@@ -108,7 +108,81 @@ class ViT(nn.Module):
         )
 
     def forward(self, img):
+        x = self.to_patch_embedding(img) # x.shape [1, 64, 1024]
+        b, n, _ = x.shape
+
+        cls_tokens = repeat(self.cls_token, '() n d -> b n d', b = b)
+        x = torch.cat((cls_tokens, x), dim=1)
+        x += self.pos_embedding[:, :(n + 1)]
+        x = self.dropout(x)
+
+        x = self.transformer(x)
+
+        x = x.mean(dim = 1) if self.pool == 'mean' else x[:, 0]
+
+        x = self.to_latent(x)
+        return self.mlp_head(x)
+
+
+# https://mccormickml.com/2019/05/14/BERT-word-embeddings-tutorial/
+class ViTwithTextInput(nn.Module):
+    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, heads, mlp_dim, text_dict_list, pool = 'cls', channels = 3, dim_head = 64, dropout = 0., emb_dropout = 0., text_seq_length = 64, text_padding_idx = 0):
+        super().__init__()
+        # init text embedding layer
+        self.text_dict_list = text_dict_list # a list of all possible characters (literally a dictionary).
+        self.text_seq_length = text_seq_length
+        self.text_padding_idx = text_padding_idx
+        self.text_dict_length = len(text_dict_list)
+        self.text_embedding_layer = torch.nn.Embedding(num_embeddings=self.text_dict_length, embedding_dim=dim, padding_idx=text_padding_idx)
+        
+        image_height, image_width = pair(image_size)
+        patch_height, patch_width = pair(patch_size)
+
+        assert image_height % patch_height == 0 and image_width % patch_width == 0, 'Image dimensions must be divisible by the patch size.'
+
+        num_patches = (image_height // patch_height) * (image_width // patch_width)
+        patch_dim = channels * patch_height * patch_width
+        assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
+
+        self.to_patch_embedding = nn.Sequential(
+            Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = patch_height, p2 = patch_width),
+            nn.Linear(patch_dim, dim),
+        )
+
+        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches + text_seq_length + 1, dim))
+        self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
+        self.dropout = nn.Dropout(emb_dropout)
+
+        self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
+
+        self.pool = pool
+        self.to_latent = nn.Identity()
+
+        self.mlp_head = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, num_classes)
+        )
+        
+    def text_to_indices(self, text):
+        # here, text is a list of strings
+        indices = []
+        for string in text:
+            sub_indices = []
+            for char_s in string:
+                sub_indices.append(self.text_dict_list.index(char_s))
+            sub_indices = sub_indices[:self.text_seq_length] # cannot go beyond text_seq_length
+            while len(sub_indices) < self.text_seq_length: # padding
+                sub_indices.append(self.text_padding_idx)
+            indices.append(sub_indices)
+        return torch.LongTensor(indices)
+        
+                
+
+    def forward(self, img, text):
         x = self.to_patch_embedding(img)
+        indices = self.text_to_indices(text)
+        x_text = self.text_embedding_layer(indices)
+        x = torch.cat((x, x_text), dim=1)
         b, n, _ = x.shape
 
         cls_tokens = repeat(self.cls_token, '() n d -> b n d', b = b)
