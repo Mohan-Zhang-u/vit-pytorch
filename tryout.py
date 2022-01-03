@@ -8,8 +8,8 @@ with open('chars.pkl', 'rb') as fp:
 v = ViTwithTextInput(
     image_size = 256,
     patch_size = 32,
-    num_classes = 1024,
-    dim = 1024,
+    num_classes = 2048,
+    dim = 2048,
     depth = 6,
     heads = 16,
     mlp_dim = 2048,

@@ -132,6 +132,7 @@ class ViTwithTextInput(nn.Module):
         self.text_dict_list = text_dict_list # a list of all possible characters (literally a dictionary).
         self.text_seq_length = text_seq_length
         self.text_padding_idx = text_padding_idx
+        self.num_classes = num_classes
         self.text_dict_length = len(text_dict_list)
         self.text_embedding_layer = torch.nn.Embedding(num_embeddings=self.text_dict_length, embedding_dim=dim, padding_idx=text_padding_idx)
         
@@ -179,20 +180,23 @@ class ViTwithTextInput(nn.Module):
                 
 
     def forward(self, img, text):
-        x = self.to_patch_embedding(img)
-        indices = self.text_to_indices(text)
-        x_text = self.text_embedding_layer(indices)
-        x = torch.cat((x, x_text), dim=1)
+        x = self.to_patch_embedding(img) # torch.Size(img.shape[0], *patch_num_calculator, dim)
+        indices = self.text_to_indices(text) # torch.Size(img.shape[0], text_seq_length)
+        x_text = self.text_embedding_layer(indices) # torch.Size(img.shape[0], text_seq_length, dim)
+        x = torch.cat((x, x_text), dim=1) # torch.Size(img.shape[0], *patch_num_calculator + text_seq_length, dim)
         b, n, _ = x.shape
 
-        cls_tokens = repeat(self.cls_token, '() n d -> b n d', b = b)
-        x = torch.cat((cls_tokens, x), dim=1)
-        x += self.pos_embedding[:, :(n + 1)]
-        x = self.dropout(x)
+        cls_tokens = repeat(self.cls_token, '() n d -> b n d', b = b) # torch.Size(img.shape[0], 1, dim)
+        x = torch.cat((cls_tokens, x), dim=1) # torch.Size(img.shape[0],1 +  *patch_num_calculator + text_seq_length, dim)
+        x += self.pos_embedding[:, :(n + 1)] # torch.Size(img.shape[0],1 +  *patch_num_calculator + text_seq_length, dim)
+        x = self.dropout(x) # torch.Size(img.shape[0],1 +  *patch_num_calculator + text_seq_length, dim)
 
-        x = self.transformer(x)
+        x = self.transformer(x) # torch.Size(img.shape[0],1 +  *patch_num_calculator + text_seq_length, dim)
 
-        x = x.mean(dim = 1) if self.pool == 'mean' else x[:, 0]
+        x = x.mean(dim = 1) if self.pool == 'mean' else x[:, 0] # torch.Size(img.shape[0], dim)
 
-        x = self.to_latent(x)
-        return self.mlp_head(x)
+        x = self.to_latent(x) # torch.Size(img.shape[0], dim)
+        x = self.mlp_head(x) # torch.Size(img.shape[0], num_classes)
+        # style_vector = x[:,:int(self.num_classes/2)] # torch.Size(img.shape[0], num_classes/2)
+        # semantic_vector = x[:,int(self.num_classes/2):] # torch.Size(img.shape[0], num_classes/2)
+        return x
