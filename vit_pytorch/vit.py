@@ -126,13 +126,14 @@ class ViT(nn.Module):
 
 # https://mccormickml.com/2019/05/14/BERT-word-embeddings-tutorial/
 class ViTwithTextInput(nn.Module):
-    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, heads, mlp_dim, text_dict_list, pool = 'cls', channels = 3, dim_head = 64, dropout = 0., emb_dropout = 0., text_seq_length = 64, text_padding_idx = 0):
+    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, decoder_depth, heads, decoder_heads, mlp_dim, decoder_mlp_dim, text_dict_list, channels = 3, dim_head = 64, decoder_dim_head=64, dropout = 0., decoder_dropout = 0., emb_dropout = 0., text_seq_length = 64, text_padding_idx = 0):
         super().__init__()
         # init text embedding layer
         self.text_dict_list = text_dict_list # a list of all possible characters (literally a dictionary).
         self.text_seq_length = text_seq_length
         self.text_padding_idx = text_padding_idx
         self.num_classes = num_classes
+        self.dim = dim # both encoder dim and decoder dim.
         self.text_dict_length = len(text_dict_list)
         self.text_embedding_layer = torch.nn.Embedding(num_embeddings=self.text_dict_length, embedding_dim=dim, padding_idx=text_padding_idx)
         
@@ -141,28 +142,30 @@ class ViTwithTextInput(nn.Module):
 
         assert image_height % patch_height == 0 and image_width % patch_width == 0, 'Image dimensions must be divisible by the patch size.'
 
-        num_patches = (image_height // patch_height) * (image_width // patch_width)
+        self.num_patches = (image_height // patch_height) * (image_width // patch_width)
         patch_dim = channels * patch_height * patch_width
-        assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
+        # assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
 
         self.to_patch_embedding = nn.Sequential(
             Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = patch_height, p2 = patch_width),
             nn.Linear(patch_dim, dim),
         )
 
-        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches + text_seq_length + 1, dim)) # we still keep the trainable pos_embedding as it is in the original ViT paper.
+        self.pos_embedding = nn.Parameter(torch.randn(1, self.num_patches + text_seq_length + 1, dim)) # we still keep the trainable pos_embedding as it is in the original ViT paper.
         self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
         self.dropout = nn.Dropout(emb_dropout)
 
-        self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
+        self.encoder_transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
+        self.decoder_transformer = Transformer(dim, decoder_depth, decoder_heads, decoder_dim_head, decoder_mlp_dim, decoder_dropout)
 
-        self.pool = pool
-        self.to_latent = nn.Identity()
+        self.to_pixels = nn.Linear(dim, patch_dim)
+        # self.pool = pool
+        # self.to_latent = nn.Identity()
 
-        self.mlp_head = nn.Sequential(
-            nn.LayerNorm(dim),
-            nn.Linear(dim, num_classes)
-        )
+        # self.mlp_head = nn.Sequential(
+        #     nn.LayerNorm(dim),
+        #     nn.Linear(dim, num_classes)
+        # )
         
     def text_to_indices(self, text):
         # here, text is a list of strings
@@ -176,8 +179,29 @@ class ViTwithTextInput(nn.Module):
                 sub_indices.append(self.text_padding_idx)
             indices.append(sub_indices)
         return torch.LongTensor(indices)
-        
-                
+    
+    def get_cls_from_x(self, x):
+        return x[:, 0:1]
+    
+    def get_img_patches_from_x(self, x):
+        return x[:, 1:1+self.num_patches]
+    
+    def get_text_patches_from_x(self, x):
+        return x[:, 1+self.num_patches:]
+    
+    def get_style_vector(self, x):
+        return x[:, :1+self.num_patches] # [cls] + patches. pos encoding was added before the encoder transformer.
+    
+    def get_semantic_vector(self, x):
+        return x[:, 1+self.num_patches:] # text patches.
+    
+    def convert_to_pixels(self, decoded_x):
+        img_patches = self.get_img_patches_from_x(decoded_x)
+        pix = self.to_pixels(img_patches)
+        return pix # torch.Size([img.shape[0], num_patches, patch_dim])
+    
+    def convert_to_text(self, decoded_x):
+        pass  
 
     def encoding(self, img, text):
         x = self.to_patch_embedding(img) # torch.Size(img.shape[0], num_patches, dim)
@@ -189,17 +213,18 @@ class ViTwithTextInput(nn.Module):
         cls_tokens = repeat(self.cls_token, '() n d -> b n d', b = b) # torch.Size(img.shape[0], 1, dim)
         x = torch.cat((cls_tokens, x), dim=1) # torch.Size(img.shape[0],1 +  num_patches + text_seq_length, dim)
         x += self.pos_embedding[:, :(n + 1)] # torch.Size(img.shape[0],1 +  num_patches + text_seq_length, dim)
-        x = self.dropout(x) # torch.Size(img.shape[0],1 +  num_patches + text_seq_length, dim)
+        x = self.dropout(x) # torch.Size(img.shape[0],1 + num_patches + text_seq_length, dim)
 
-        x = self.transformer(x) # torch.Size(img.shape[0],1 +  num_patches + text_seq_length, dim)
+        x = self.encoder_transformer(x) # torch.Size(img.shape[0],1 +  num_patches + text_seq_length, dim)
 
-        x = x.mean(dim = 1) if self.pool == 'mean' else x[:, 0] # torch.Size(img.shape[0], dim)
+        # x = x.mean(dim = 1) if self.pool == 'mean' else x[:, 0] # torch.Size(img.shape[0], dim)
 
-        x = self.to_latent(x) # torch.Size(img.shape[0], dim)
-        x = self.mlp_head(x) # torch.Size(img.shape[0], num_classes)
-        # style_vector = x[:,:int(self.num_classes/2)] # torch.Size(img.shape[0], num_classes/2)
-        # semantic_vector = x[:,int(self.num_classes/2):] # torch.Size(img.shape[0], num_classes/2)
+        # x = self.to_latent(x) # torch.Size(img.shape[0], dim)
+        # x = self.mlp_head(x) # torch.Size(img.shape[0], num_classes)
+        # # style_vector = x[:,:int(self.num_classes/2)] # torch.Size(img.shape[0], num_classes/2)
+        # # semantic_vector = x[:,int(self.num_classes/2):] # torch.Size(img.shape[0], num_classes/2)
         return x
 
     def decoding(self, x):
-        pass
+        decoded_x = self.decoder_transformer(x) # torch.Size(img.shape[0],1 +  num_patches + text_seq_length, dim)
+        return decoded_x
