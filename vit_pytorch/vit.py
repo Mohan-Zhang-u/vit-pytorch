@@ -126,7 +126,7 @@ class ViT(nn.Module):
 
 # https://mccormickml.com/2019/05/14/BERT-word-embeddings-tutorial/
 class ViTwithTextInput(nn.Module):
-    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, decoder_depth, heads, decoder_heads, mlp_dim, decoder_mlp_dim, text_dict_list, channels = 3, dim_head = 64, decoder_dim_head=64, dropout = 0., decoder_dropout = 0., emb_dropout = 0., text_seq_length = 64, text_padding_idx = 0, img_tensor_loss_weight = 1., text_tensor_loss_weight = 1., vector_loss_weight = 1.):
+    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, decoder_depth, heads, decoder_heads, mlp_dim, decoder_mlp_dim, text_dict_list, channels = 3, dim_head = 64, decoder_dim_head=64, dropout = 0., decoder_dropout = 0., emb_dropout = 0., text_seq_length = 64, text_padding_idx = 0, img_tensor_loss_weight = 1., text_tensor_loss_weight = 0.1, vector_loss_weight = 1.):
         super().__init__()
         # init text embedding layer
         self.text_dict_list = text_dict_list # a list of all possible characters (literally a dictionary).
@@ -165,8 +165,8 @@ class ViTwithTextInput(nn.Module):
         # loss functions
         self.img_tensor_loss = torch.nn.MSELoss(reduction='mean')
         self.img_tensor_loss_weight = img_tensor_loss_weight
-        self.text_tensor_loss = torch.nn.CrossEntropyLoss(reduction='mean', label_smoothing=0.)
-        self.text_tensor_loss_weight = text_tensor_loss_weight
+        self.text_tensor_loss = torch.nn.CrossEntropyLoss(reduction='mean', label_smoothing=0.) # https://discuss.pytorch.org/t/loss-functions-for-batches/20488/7 batch size included.
+        self.text_tensor_loss_weight = text_tensor_loss_weight # should be small, as it does not directly affect our desired output.
         self.vector_loss = torch.nn.MSELoss(reduction='mean')
         self.vector_loss_weight = vector_loss_weight
         
@@ -191,6 +191,16 @@ class ViTwithTextInput(nn.Module):
             indices.append(sub_indices)
         return torch.LongTensor(indices)
     
+    def indices_to_text(self, indices):
+        texts = []
+        for text_indices in indices:
+            text = ''
+            for char_indices in text_indices:
+                idx = char_indices.item()
+                text += self.text_dict_list[idx]
+            texts.append(text)
+        return texts
+    
     def get_cls_from_x(self, x):
         return x[:, 0:1]
     
@@ -198,7 +208,7 @@ class ViTwithTextInput(nn.Module):
         return x[:, 1:1+self.num_patches]
     
     def get_text_patches_from_x(self, x):
-        return x[:, 1+self.num_patches:] # torch.Size(img.shape[0],text_seq_length, dim)
+        return x[:, 1+self.num_patches:]
     
     def get_style_vector(self, x):
         return x[:, :1+self.num_patches] # [cls] + patches. pos encoding was added before the encoder transformer.
@@ -212,9 +222,14 @@ class ViTwithTextInput(nn.Module):
         img_back = rearrange(pix, 'b (hn wn) (p1 p2 c) -> b c (hn p1) (wn p2)', p1=self.patch_height, p2=self.patch_width, hn=self.h_n_patches, wn=self.w_n_patches) # torch.Size([img.shape[0], c, self.image_height, self.image_width])
         return img_back
     
+    def get_text_mins(self, decoded_x):
+        text_patches = self.get_text_patches_from_x(decoded_x) # torch.Size(img.shape[0],text_seq_length, dim)
+        cos_sim = torch.matmul(text_patches, torch.transpose(self.text_embedding_layer.weight, 0, 1)) # torch.Size(img.shape[0],text_seq_length, self.text_dict_length)
+        return torch.min(cos_sim, 2) # torch.Size(img.shape[0],text_seq_length)
+    
     def convert_to_text(self, decoded_x):
-        text_patches = self.get_text_patches_from_x(decoded_x)
-        pass  
+        min_vals, min_indices = self.get_text_mins(decoded_x)
+        return self.indices_to_text(min_indices)
     
     def compute_img_tensor_loss(self, orig_img_tensor, pred_img_tensor):
         return self.img_tensor_loss_weight * self.img_tensor_loss(orig_img_tensor, pred_img_tensor)
@@ -222,8 +237,17 @@ class ViTwithTextInput(nn.Module):
     def compute_vector_loss(self, orig_vector, pred_vector):
         return self.vector_loss_weight * self.vector_loss(orig_vector, pred_vector)
     
-    def compute_text_tensor_loss(self, orig_text_tensor, pred_text_tensor):
-        pass
+    def compute_text_tensor_loss(self, orig_text, pred_text_tensor):
+        """
+        orig_text are list of strings.
+        pred_text_tensor should be a result of get_text_patches_from_x
+        """
+        target = self.text_to_indices(orig_text)
+        cos_sim = torch.matmul(pred_text_tensor, torch.transpose(self.text_embedding_layer.weight, 0, 1))
+        # shift batch size to be d_K
+        cos_sim = rearrange(cos_sim, 'b n c -> n c b')
+        target = rearrange(target, 'b n -> n b')
+        return self.text_tensor_loss_weight * self.text_tensor_loss(cos_sim, target)
         
     def encoding(self, img, text):
         x = self.to_patch_embedding(img) # torch.Size(img.shape[0], num_patches, dim)
