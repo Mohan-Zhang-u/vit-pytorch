@@ -126,7 +126,7 @@ class ViT(nn.Module):
 
 # https://mccormickml.com/2019/05/14/BERT-word-embeddings-tutorial/
 class ViTwithTextInput(nn.Module):
-    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, decoder_depth, heads, decoder_heads, mlp_dim, decoder_mlp_dim, text_dict_list, channels = 3, dim_head = 64, decoder_dim_head=64, dropout = 0., decoder_dropout = 0., emb_dropout = 0., text_seq_length = 64, text_padding_idx = 0):
+    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, decoder_depth, heads, decoder_heads, mlp_dim, decoder_mlp_dim, text_dict_list, channels = 3, dim_head = 64, decoder_dim_head=64, dropout = 0., decoder_dropout = 0., emb_dropout = 0., text_seq_length = 64, text_padding_idx = 0, img_tensor_loss_weight = 1., text_tensor_loss_weight = 1., vector_loss_weight = 1.):
         super().__init__()
         # init text embedding layer
         self.text_dict_list = text_dict_list # a list of all possible characters (literally a dictionary).
@@ -135,19 +135,21 @@ class ViTwithTextInput(nn.Module):
         self.num_classes = num_classes
         self.dim = dim # both encoder dim and decoder dim.
         self.text_dict_length = len(text_dict_list)
-        self.text_embedding_layer = torch.nn.Embedding(num_embeddings=self.text_dict_length, embedding_dim=dim, padding_idx=text_padding_idx)
+        self.text_embedding_layer = torch.nn.Embedding(num_embeddings=self.text_dict_length, embedding_dim=dim, padding_idx=text_padding_idx, max_norm=1., norm_type=2.) # https://stats.stackexchange.com/questions/177905/should-i-normalize-word2vecs-word-vectors-before-using-them
         
-        image_height, image_width = pair(image_size)
-        patch_height, patch_width = pair(patch_size)
+        self.image_height, self.image_width = pair(image_size)
+        self.patch_height, self.patch_width = pair(patch_size)
 
-        assert image_height % patch_height == 0 and image_width % patch_width == 0, 'Image dimensions must be divisible by the patch size.'
+        assert self.image_height % self.patch_height == 0 and self.image_width % self.patch_width == 0, 'Image dimensions must be divisible by the patch size.'
 
-        self.num_patches = (image_height // patch_height) * (image_width // patch_width)
-        patch_dim = channels * patch_height * patch_width
+        self.h_n_patches = self.image_height // self.patch_height
+        self.w_n_patches = self.image_width // self.patch_width
+        self.num_patches = self.h_n_patches * self.w_n_patches
+        patch_dim = channels * self.patch_height * self.patch_width
         # assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
 
         self.to_patch_embedding = nn.Sequential(
-            Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = patch_height, p2 = patch_width),
+            Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = self.patch_height, p2 = self.patch_width),
             nn.Linear(patch_dim, dim),
         )
 
@@ -159,6 +161,15 @@ class ViTwithTextInput(nn.Module):
         self.decoder_transformer = Transformer(dim, decoder_depth, decoder_heads, decoder_dim_head, decoder_mlp_dim, decoder_dropout)
 
         self.to_pixels = nn.Linear(dim, patch_dim)
+        
+        # loss functions
+        self.img_tensor_loss = torch.nn.MSELoss(reduction='mean')
+        self.img_tensor_loss_weight = img_tensor_loss_weight
+        self.text_tensor_loss = torch.nn.CrossEntropyLoss(reduction='mean', label_smoothing=0.)
+        self.text_tensor_loss_weight = text_tensor_loss_weight
+        self.vector_loss = torch.nn.MSELoss(reduction='mean')
+        self.vector_loss_weight = vector_loss_weight
+        
         # self.pool = pool
         # self.to_latent = nn.Identity()
 
@@ -187,7 +198,7 @@ class ViTwithTextInput(nn.Module):
         return x[:, 1:1+self.num_patches]
     
     def get_text_patches_from_x(self, x):
-        return x[:, 1+self.num_patches:]
+        return x[:, 1+self.num_patches:] # torch.Size(img.shape[0],text_seq_length, dim)
     
     def get_style_vector(self, x):
         return x[:, :1+self.num_patches] # [cls] + patches. pos encoding was added before the encoder transformer.
@@ -195,14 +206,25 @@ class ViTwithTextInput(nn.Module):
     def get_semantic_vector(self, x):
         return x[:, 1+self.num_patches:] # text patches.
     
-    def convert_to_pixels(self, decoded_x):
+    def convert_to_img(self, decoded_x):
         img_patches = self.get_img_patches_from_x(decoded_x)
-        pix = self.to_pixels(img_patches)
-        return pix # torch.Size([img.shape[0], num_patches, patch_dim])
+        pix = self.to_pixels(img_patches) # torch.Size([img.shape[0], num_patches, patch_dim])
+        img_back = rearrange(pix, 'b (hn wn) (p1 p2 c) -> b c (hn p1) (wn p2)', p1=self.patch_height, p2=self.patch_width, hn=self.h_n_patches, wn=self.w_n_patches) # torch.Size([img.shape[0], c, self.image_height, self.image_width])
+        return img_back
     
     def convert_to_text(self, decoded_x):
+        text_patches = self.get_text_patches_from_x(decoded_x)
         pass  
-
+    
+    def compute_img_tensor_loss(self, orig_img_tensor, pred_img_tensor):
+        return self.img_tensor_loss_weight * self.img_tensor_loss(orig_img_tensor, pred_img_tensor)
+    
+    def compute_vector_loss(self, orig_vector, pred_vector):
+        return self.vector_loss_weight * self.vector_loss(orig_vector, pred_vector)
+    
+    def compute_text_tensor_loss(self, orig_text_tensor, pred_text_tensor):
+        pass
+        
     def encoding(self, img, text):
         x = self.to_patch_embedding(img) # torch.Size(img.shape[0], num_patches, dim)
         indices = self.text_to_indices(text) # torch.Size(img.shape[0], text_seq_length)
