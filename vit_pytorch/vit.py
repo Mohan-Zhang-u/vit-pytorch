@@ -126,12 +126,14 @@ class ViT(nn.Module):
 
 # https://mccormickml.com/2019/05/14/BERT-word-embeddings-tutorial/
 class ViTwithTextInput(nn.Module):
-    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, heads, mlp_dim, pool = 'cls', channels = 3, dim_head = 64, dropout = 0., emb_dropout = 0., text_seq_length = 64, text_dict_length = 10158):
+    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, heads, mlp_dim, text_dict_list, pool = 'cls', channels = 3, dim_head = 64, dropout = 0., emb_dropout = 0., text_seq_length = 64, text_padding_idx = 0):
         super().__init__()
         # init text embedding layer
+        self.text_dict_list = text_dict_list # a list of all possible characters (literally a dictionary).
         self.text_seq_length = text_seq_length
-        self.text_dict_length = text_dict_length
-        self.text_embedding_layer = torch.nn.Embedding(num_embeddings=text_dict_length, embedding_dim=dim)
+        self.text_padding_idx = text_padding_idx
+        self.text_dict_length = len(text_dict_list)
+        self.text_embedding_layer = torch.nn.Embedding(num_embeddings=self.text_dict_length, embedding_dim=dim, padding_idx=text_padding_idx)
         
         image_height, image_width = pair(image_size)
         patch_height, patch_width = pair(patch_size)
@@ -160,10 +162,25 @@ class ViTwithTextInput(nn.Module):
             nn.LayerNorm(dim),
             nn.Linear(dim, num_classes)
         )
+        
+    def text_to_indices(self, text):
+        # here, text is a list of strings
+        indices = []
+        for string in text:
+            sub_indices = []
+            for char_s in string:
+                sub_indices.append(self.text_dict_list.index(char_s))
+            sub_indices = sub_indices[:self.text_seq_length] # cannot go beyond text_seq_length
+            while len(sub_indices) < self.text_seq_length: # padding
+                sub_indices.append(self.text_padding_idx)
+            indices.append(sub_indices)
+        return torch.LongTensor(indices)
+        
+                
 
     def forward(self, img, text):
         x = self.to_patch_embedding(img)
-        indices = torch.LongTensor([list(range(64))]) # TODO: convert to long tensor !!! also need to pad to len 64
+        indices = self.text_to_indices(text)
         x_text = self.text_embedding_layer(indices)
         x = torch.cat((x, x_text), dim=1)
         b, n, _ = x.shape
