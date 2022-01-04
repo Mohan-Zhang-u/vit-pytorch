@@ -126,7 +126,7 @@ class ViT(nn.Module):
 
 # https://mccormickml.com/2019/05/14/BERT-word-embeddings-tutorial/
 class ViTwithTextInput(nn.Module):
-    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, decoder_depth, heads, decoder_heads, mlp_dim, decoder_mlp_dim, text_dict_list, channels = 3, dim_head = 64, decoder_dim_head=64, dropout = 0., decoder_dropout = 0., emb_dropout = 0., text_seq_length = 64, text_padding_idx = 0, img_tensor_loss_weight = 1., text_tensor_loss_weight = 0.1, vector_loss_weight = 1.):
+    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, decoder_depth, heads, decoder_heads, mlp_dim, decoder_mlp_dim, text_dict_list, channels = 3, dim_head = 64, decoder_dim_head=64, dropout = 0., decoder_dropout = 0., emb_dropout = 0., text_seq_length = 64, text_padding_idx = 0, img_loss_weight = 1., text_loss_weight = 0.1, vector_loss_weight = 1.):
         super().__init__()
         # init text embedding layer
         self.text_dict_list = text_dict_list # a list of all possible characters (literally a dictionary).
@@ -163,10 +163,10 @@ class ViTwithTextInput(nn.Module):
         self.to_pixels = nn.Linear(dim, patch_dim)
         
         # loss functions
-        self.img_tensor_loss = torch.nn.MSELoss(reduction='mean')
-        self.img_tensor_loss_weight = img_tensor_loss_weight
-        self.text_tensor_loss = torch.nn.CrossEntropyLoss(reduction='mean', label_smoothing=0.) # https://discuss.pytorch.org/t/loss-functions-for-batches/20488/7 batch size included.
-        self.text_tensor_loss_weight = text_tensor_loss_weight # should be small, as it does not directly affect our desired output.
+        self.img_loss = torch.nn.MSELoss(reduction='mean')
+        self.img_loss_weight = img_loss_weight
+        self.text_loss = torch.nn.CrossEntropyLoss(reduction='mean', label_smoothing=0.) # https://discuss.pytorch.org/t/loss-functions-for-batches/20488/7 batch size included.
+        self.text_loss_weight = text_loss_weight # should be small, as it does not directly affect our desired output.
         self.vector_loss = torch.nn.MSELoss(reduction='mean')
         self.vector_loss_weight = vector_loss_weight
         
@@ -231,25 +231,29 @@ class ViTwithTextInput(nn.Module):
         min_vals, min_indices = self.get_text_mins(decoded_x)
         return self.indices_to_text(min_indices)
     
-    def compute_img_tensor_loss(self, orig_img_tensor, pred_img_tensor):
-        return self.img_tensor_loss_weight * self.img_tensor_loss(orig_img_tensor, pred_img_tensor)
+    def compute_img_loss(self, orig_img, pred_img):
+        """
+        orig_img is something after T.ToTensor(Image.open(p))
+        """
+        return self.img_loss_weight * self.img_loss(orig_img, pred_img)
     
     def compute_vector_loss(self, orig_vector, pred_vector):
         return self.vector_loss_weight * self.vector_loss(orig_vector, pred_vector)
     
-    def compute_text_tensor_loss(self, orig_text, pred_text_tensor):
+    def compute_text_loss(self, orig_text, pred_text_tensor):
         """
         orig_text are list of strings.
-        pred_text_tensor should be a result of get_text_patches_from_x
+        pred_text_tensor should be a result of get_text_patches_from_x(decoded_x)
         """
         target = self.text_to_indices(orig_text)
         cos_sim = torch.matmul(pred_text_tensor, torch.transpose(self.text_embedding_layer.weight, 0, 1))
         # shift batch size to be d_K
         cos_sim = rearrange(cos_sim, 'b n c -> n c b')
         target = rearrange(target, 'b n -> n b')
-        return self.text_tensor_loss_weight * self.text_tensor_loss(cos_sim, target)
+        return self.text_loss_weight * self.text_loss(cos_sim, target)
         
     def encoding(self, img, text):
+        # both img and text are batchified.
         x = self.to_patch_embedding(img) # torch.Size(img.shape[0], num_patches, dim)
         indices = self.text_to_indices(text) # torch.Size(img.shape[0], text_seq_length)
         x_text = self.text_embedding_layer(indices) # torch.Size(img.shape[0], text_seq_length, dim)
@@ -274,3 +278,24 @@ class ViTwithTextInput(nn.Module):
     def decoding(self, x):
         decoded_x = self.decoder_transformer(x) # torch.Size(img.shape[0],1 +  num_patches + text_seq_length, dim)
         return decoded_x
+    
+    def compute_training_loss(self, l1_imgs, l2_imgs, l1_texts, l2_texts):
+        # l1 reconstruction.
+        l1_x = self.encoding(l1_imgs, l1_texts)
+        l1_decoded_x = self.decoding(l1_x)
+        # l1 reconstruction loss
+        l1_self_pred_img = self.convert_to_img(l1_decoded_x)
+        l1_self_pred_text_patches = self.get_text_patches_from_x(l1_decoded_x)
+        l1_recon_loss = self.compute_img_loss(l1_imgs, l1_self_pred_img) + self.compute_text_loss(l1_texts, l1_self_pred_text_patches) # loss1 + loss2
+        
+        # l2 reconstruction.
+        l2_x = self.encoding(l2_imgs, l2_texts)
+        l2_decoded_x = self.decoding(l2_x)
+        # l2 reconstruction loss
+        l2_self_pred_img = self.convert_to_img(l2_decoded_x)
+        l2_self_pred_text_patches = self.get_text_patches_from_x(l2_decoded_x)
+        l2_recon_loss = self.compute_img_loss(l2_imgs, l2_self_pred_img) + self.compute_text_loss(l2_texts, l2_self_pred_text_patches) # loss3 + loss4
+        
+        
+    def forward(self, l1_imgs, l2_texts):
+        pass
