@@ -191,7 +191,8 @@ class ViTwithTextInput(nn.Module):
             while len(sub_indices) < self.text_seq_length: # padding
                 sub_indices.append(self.text_padding_idx)
             indices.append(sub_indices)
-        return torch.LongTensor(indices)
+        indices = torch.LongTensor(indices).to(self.to_pixels.weight.device)
+        return indices
     
     def indices_to_text(self, indices):
         texts = []
