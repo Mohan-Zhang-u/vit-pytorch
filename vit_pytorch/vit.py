@@ -230,7 +230,8 @@ class ViTwithTextInput(nn.Module):
     
     def get_text_mins(self, decoded_x):
         text_patches = self.get_text_patches_from_x(decoded_x) # torch.Size(img.shape[0],text_seq_length, dim)
-        cos_sim = torch.matmul(text_patches, torch.transpose(self.text_embedding_layer.weight, 0, 1)) # torch.Size(img.shape[0],text_seq_length, self.text_dict_length)
+        embed_weight_t = rearrange(self.text_embedding_layer.weight.detach().clone(), 'b n -> n b')
+        cos_sim = torch.matmul(text_patches, embed_weight_t) # torch.Size(img.shape[0],text_seq_length, self.text_dict_length)
         return torch.min(cos_sim, 2) # torch.Size(img.shape[0],text_seq_length)
     
     def convert_to_text(self, decoded_x):
@@ -252,7 +253,8 @@ class ViTwithTextInput(nn.Module):
         pred_text_tensor should be a result of get_text_patches_from_x(decoded_x)
         """
         target = self.text_to_indices(orig_text)
-        cos_sim = torch.matmul(pred_text_tensor, torch.transpose(self.text_embedding_layer.weight, 0, 1))
+        embed_weight_t = rearrange(self.text_embedding_layer.weight.detach().clone(), 'b n -> n b') # otherwise triggers RuntimeError: one of the variables needed for gradient computation has been modified by an inplace operation
+        cos_sim = torch.matmul(pred_text_tensor, embed_weight_t)
         # shift batch size to be d_K
         cos_sim = rearrange(cos_sim, 'b n c -> n c b')
         target = rearrange(target, 'b n -> n b')
