@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+import codecs
 
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
@@ -126,11 +127,12 @@ class ViT(nn.Module):
 
 # https://mccormickml.com/2019/05/14/BERT-word-embeddings-tutorial/
 class ViTwithTextInput(nn.Module):
-    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, decoder_depth, language_transform_depth, heads, decoder_heads, language_transform_heads, mlp_dim, decoder_mlp_dim, language_transform_dim, text_dict_list, channels = 3, dim_head = 64, decoder_dim_head=64, language_transform_dim_head=64, dropout = 0., decoder_dropout = 0., language_transform_dropout = 0., emb_dropout = 0., text_seq_length = 64, text_padding_idx = 0, img_loss_weight = 1., text_loss_weight = 0.1, vector_loss_weight = 1.):
+    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, decoder_depth, language_transform_depth, heads, decoder_heads, language_transform_heads, mlp_dim, decoder_mlp_dim, language_transform_dim, text_dict_list, channels = 3, dim_head = 64, decoder_dim_head=64, language_transform_dim_head=64, dropout = 0., decoder_dropout = 0., language_transform_dropout = 0., emb_dropout = 0., text_seq_length = 64, unknown_char_loc='unknown.txt', text_padding_idx = 0, img_loss_weight = 1., text_loss_weight = 0.1, vector_loss_weight = 1.):
         super().__init__()
         # init text embedding layer
         self.text_dict_list = text_dict_list # a list of all possible characters (literally a dictionary).
         self.text_seq_length = text_seq_length
+        self.unknown_char_fp = codecs.open(unknown_char_loc, 'w+', 'utf-8')
         self.text_padding_idx = text_padding_idx
         self.num_classes = num_classes
         self.dim = dim # both encoder dim and decoder dim.
@@ -186,7 +188,13 @@ class ViTwithTextInput(nn.Module):
         for string in text:
             sub_indices = []
             for char_s in string:
-                sub_indices.append(self.text_dict_list.index(char_s))
+                # sub_indices.append(self.text_dict_list.index(char_s))
+                if char_s in self.text_dict_list:
+                    sub_indices.append(self.text_dict_list.index(char_s))
+                else:
+                    sub_indices.append(self.text_dict_list.index('𖡄')) # unknown character.
+                    print('unknown:', char_s)
+                    self.unknown_char_fp.write(char_s)
             sub_indices = sub_indices[:self.text_seq_length] # cannot go beyond text_seq_length
             while len(sub_indices) < self.text_seq_length: # padding
                 sub_indices.append(self.text_padding_idx)
