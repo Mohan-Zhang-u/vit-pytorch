@@ -284,7 +284,7 @@ class ViTwithTextInput(nn.Module):
         decoded_x = self.decoder_transformer(x) # torch.Size(img.shape[0],1 +  num_patches + text_seq_length, dim)
         return decoded_x
     
-    def compute_training_loss(self, l1_imgs, l1_texts, l2_imgs, l2_texts):
+    def compute_loss(self, l1_imgs, l1_texts, l2_imgs, l2_texts):
         # l1 reconstruction.
         l1_x = self.encoding(l1_imgs, l1_texts)
         l1_decoded_x = self.decoding(l1_x)
