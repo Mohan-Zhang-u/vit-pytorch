@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 import codecs
-
+import pickle
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 
@@ -132,7 +132,8 @@ class ViTwithTextInput(nn.Module):
         # init text embedding layer
         self.text_dict_list = text_dict_list # a list of all possible characters (literally a dictionary).
         self.text_seq_length = text_seq_length
-        self.unknown_char_fp = codecs.open(unknown_char_loc, 'w+', 'utf-8')
+        self.unknown_char_loc = unknown_char_loc
+        self.unknown_chars = []
         self.text_padding_idx = text_padding_idx
         self.num_classes = num_classes
         self.dim = dim # both encoder dim and decoder dim.
@@ -193,8 +194,11 @@ class ViTwithTextInput(nn.Module):
                     sub_indices.append(self.text_dict_list.index(char_s))
                 else:
                     sub_indices.append(self.text_dict_list.index('𖡄')) # unknown character.
-                    print('unknown:', char_s)
-                    self.unknown_char_fp.write(char_s)
+                    if char_s not in self.unknown_chars:
+                        print('unknown:', char_s)
+                        self.unknown_chars.append(char_s)
+                        with open(self.unknown_char_loc, 'wb') as fp:
+                            pickle.dump(self.unknown_chars, fp)
             sub_indices = sub_indices[:self.text_seq_length] # cannot go beyond text_seq_length
             while len(sub_indices) < self.text_seq_length: # padding
                 sub_indices.append(self.text_padding_idx)
