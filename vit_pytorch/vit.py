@@ -126,7 +126,7 @@ class ViT(nn.Module):
 
 # https://mccormickml.com/2019/05/14/BERT-word-embeddings-tutorial/
 class ViTwithTextInput(nn.Module):
-    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, decoder_depth, heads, decoder_heads, mlp_dim, decoder_mlp_dim, text_dict_list, channels = 3, dim_head = 64, decoder_dim_head=64, dropout = 0., decoder_dropout = 0., emb_dropout = 0., text_seq_length = 64, text_padding_idx = 0, img_loss_weight = 1., text_loss_weight = 0.1, vector_loss_weight = 1.):
+    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, decoder_depth, language_transform_depth, heads, decoder_heads, language_transform_heads, mlp_dim, decoder_mlp_dim, language_transform_dim, text_dict_list, channels = 3, dim_head = 64, decoder_dim_head=64, language_transform_dim_head=64, dropout = 0., decoder_dropout = 0., language_transform_dropout = 0., emb_dropout = 0., text_seq_length = 64, text_padding_idx = 0, img_loss_weight = 1., text_loss_weight = 0.1, vector_loss_weight = 1.):
         super().__init__()
         # init text embedding layer
         self.text_dict_list = text_dict_list # a list of all possible characters (literally a dictionary).
@@ -159,6 +159,8 @@ class ViTwithTextInput(nn.Module):
 
         self.encoder_transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
         self.decoder_transformer = Transformer(dim, decoder_depth, decoder_heads, decoder_dim_head, decoder_mlp_dim, decoder_dropout)
+        self.l1_to_l2_style_transformer = Transformer(dim, language_transform_depth, language_transform_heads, language_transform_dim_head, language_transform_dim, language_transform_dropout)
+        self.l2_to_l1_style_transformer = Transformer(dim, language_transform_depth, language_transform_heads, language_transform_dim_head, language_transform_dim, language_transform_dropout)
 
         self.to_pixels = nn.Linear(dim, patch_dim)
         
@@ -215,6 +217,9 @@ class ViTwithTextInput(nn.Module):
     
     def get_semantic_vector(self, x):
         return x[:, 1+self.num_patches:] # text patches.
+    
+    def cat_style_and_semantic_vectors(self, style_vector, semantic_vector):
+        return torch.cat((style_vector, semantic_vector), dim=1)
     
     def convert_to_img(self, decoded_x):
         img_patches = self.get_img_patches_from_x(decoded_x)
@@ -286,7 +291,9 @@ class ViTwithTextInput(nn.Module):
         # l1 reconstruction loss
         l1_self_pred_img = self.convert_to_img(l1_decoded_x)
         l1_self_pred_text_patches = self.get_text_patches_from_x(l1_decoded_x)
-        l1_recon_loss = self.compute_img_loss(l1_imgs, l1_self_pred_img) + self.compute_text_loss(l1_texts, l1_self_pred_text_patches) # loss1 + loss2
+        loss1 = self.compute_img_loss(l1_imgs, l1_self_pred_img)
+        loss2 = self.compute_text_loss(l1_texts, l1_self_pred_text_patches)
+        # l1_recon_loss = loss1 + loss2
         
         # l2 reconstruction.
         l2_x = self.encoding(l2_imgs, l2_texts)
@@ -294,8 +301,63 @@ class ViTwithTextInput(nn.Module):
         # l2 reconstruction loss
         l2_self_pred_img = self.convert_to_img(l2_decoded_x)
         l2_self_pred_text_patches = self.get_text_patches_from_x(l2_decoded_x)
-        l2_recon_loss = self.compute_img_loss(l2_imgs, l2_self_pred_img) + self.compute_text_loss(l2_texts, l2_self_pred_text_patches) # loss3 + loss4
+        loss3 = self.compute_img_loss(l2_imgs, l2_self_pred_img)
+        loss4 = self.compute_text_loss(l2_texts, l2_self_pred_text_patches)
+        # l2_recon_loss = loss3 + loss4
+        
+        # Z vector consistency loss.
+        l1_zc = self.get_semantic_vector(l1_x) # zc1
+        l1_zs = self.get_style_vector(l1_x) # zs1
+        l1_zsp = self.l1_to_l2_style_transformer(l1_zs) # zs1'
+        l1_zspp = self.l2_to_l1_style_transformer(l1_zsp) # zs1''
+        
+        l2_zc = self.get_semantic_vector(l2_x) # zc2
+        l2_zs = self.get_style_vector(l2_x) # zs2
+        l2_zsp = self.l2_to_l1_style_transformer(l2_zs) # zs2'
+        l2_zsppp = self.l1_to_l2_style_transformer(l2_zsp) # zs2''
+        
+        loss5 = self.compute_vector_loss(l1_zs, l1_zspp)
+        loss6 = self.compute_vector_loss(l2_zs, l2_zsppp)
+        loss7 = self.compute_vector_loss(l1_zs, l2_zsp)
+        loss8 = self.compute_vector_loss(l2_zs, l1_zsp)
+        
+        # twist language text loss.
+        l1_img_l2_text_x = self.encoding(l1_imgs, l2_texts)
+        zs3 = self.get_style_vector(l1_img_l2_text_x)
+        zc3 = self.get_semantic_vector(l1_img_l2_text_x)
+        loss9 = self.compute_vector_loss(l1_zs, zs3)
+        zs3_p = self.l1_to_l2_style_transformer(zs3)
+        # same_as_loss8 = self.compute_vector_loss(l2_zs, zs3_p)
+        loss10 = self.compute_vector_loss(l2_zc, zc3)
+        l1_img_l2_text_x_p = self.cat_style_and_semantic_vectors(zs3_p, zc3)
+        l1_img_l2_text_decoded_x = self.decoding(l1_img_l2_text_x_p)
+        l1_img_l2_text_pred_img = self.convert_to_img(l1_img_l2_text_decoded_x)
+        l1_img_l2_text_pred_text_patches = self.get_text_patches_from_x(l1_img_l2_text_decoded_x)
+        loss11 = self.compute_img_loss(l2_imgs, l1_img_l2_text_pred_img)
+        loss12 = self.compute_text_loss(l2_texts, l1_img_l2_text_pred_text_patches)
+        
+        l2_img_l1_text_x = self.encoding(l2_imgs, l1_texts)
+        zs4 = self.get_style_vector(l2_img_l1_text_x)
+        zc4 = self.get_semantic_vector(l2_img_l1_text_x)
+        loss13 = self.compute_vector_loss(l2_zs, zs4)
+        zs4_p = self.l2_to_l1_style_transformer(zs4)
+        # same_as_loss7 = self.compute_vector_loss(l1_zs, zs4_p)
+        loss14 = self.compute_vector_loss(l1_zc, zc4)
+        l2_img_l1_text_x_p = self.cat_style_and_semantic_vectors(zs4_p, zc4)
+        l2_img_l1_text_decoded_x = self.decoding(l2_img_l1_text_x_p)
+        l2_img_l1_text_pred_img = self.convert_to_img(l2_img_l1_text_decoded_x)
+        l2_img_l1_text_pred_text_patches = self.get_text_patches_from_x(l2_img_l1_text_decoded_x)
+        loss15 = self.compute_img_loss(l1_imgs, l2_img_l1_text_pred_img)
+        loss16 = self.compute_text_loss(l1_texts, l2_img_l1_text_pred_text_patches)
+        return loss1, loss2, loss3, loss4, loss5, loss6, loss7, loss8, loss9, loss10, loss11, loss12, loss13, loss14, loss15, loss16
         
         
     def forward(self, l1_imgs, l2_texts):
-        pass
+        l1_img_l2_text_x = self.encoding(l1_imgs, l2_texts)
+        zs3 = self.get_style_vector(l1_img_l2_text_x)
+        zc3 = self.get_semantic_vector(l1_img_l2_text_x)
+        zs3_p = self.l1_to_l2_style_transformer(zs3)
+        l1_img_l2_text_x_p = self.cat_style_and_semantic_vectors(zs3_p, zc3)
+        l1_img_l2_text_decoded_x = self.decoding(l1_img_l2_text_x_p)
+        l1_img_l2_text_pred_img = self.convert_to_img(l1_img_l2_text_decoded_x)
+        return l1_img_l2_text_pred_img
