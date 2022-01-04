@@ -70,6 +70,7 @@ v = ViTwithTextInput(
 img = torch.randn(1, 3, image_size, image_size)
 x = v.encoding(img, ["hello world!"]) # (1, num_classes)
 decoded_x = v.decoding(x)
+loss = v.compute_training_loss(img, ["hello world!"], img, ["hello world!"])
 print(1)
 
 # v = ViT(
