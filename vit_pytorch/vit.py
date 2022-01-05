@@ -366,7 +366,6 @@ class ViTwithTextInput(nn.Module):
         loss16 = self.compute_text_loss(l1_texts, l2_img_l1_text_pred_text_patches)
         return loss1, loss2, loss3, loss4, loss5, loss6, loss7, loss8, loss9, loss10, loss11, loss12, loss13, loss14, loss15, loss16
         
-        
     def forward(self, l1_imgs, l2_texts):
         l1_img_l2_text_x = self.encoding(l1_imgs, l2_texts)
         zs3 = self.get_style_vector(l1_img_l2_text_x)
@@ -376,3 +375,9 @@ class ViTwithTextInput(nn.Module):
         l1_img_l2_text_decoded_x = self.decoding(l1_img_l2_text_x_p)
         l1_img_l2_text_pred_img = self.convert_to_img(l1_img_l2_text_decoded_x)
         return l1_img_l2_text_pred_img
+    
+    def forward_reconstruct(self, l1_imgs, l1_texts):
+        x = self.encoding(l1_imgs, l1_texts)
+        decoded_x = self.decoding(x)
+        pred_img = self.convert_to_img(decoded_x)
+        return pred_img
