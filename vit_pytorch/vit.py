@@ -124,10 +124,73 @@ class ViT(nn.Module):
         x = self.to_latent(x)
         return self.mlp_head(x)
 
+class LSA(nn.Module):
+    def __init__(self, dim, heads = 8, dim_head = 64, dropout = 0.):
+        super().__init__()
+        inner_dim = dim_head *  heads
+        self.heads = heads
+        self.temperature = nn.Parameter(torch.log(torch.tensor(dim_head ** -0.5)))
+
+        self.attend = nn.Softmax(dim = -1)
+        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = False)
+
+        self.to_out = nn.Sequential(
+            nn.Linear(inner_dim, dim),
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x):
+        qkv = self.to_qkv(x).chunk(3, dim = -1)
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = self.heads), qkv)
+
+        dots = torch.matmul(q, k.transpose(-1, -2)) * self.temperature.exp()
+
+        mask = torch.eye(dots.shape[-1], device = dots.device, dtype = torch.bool)
+        mask_value = -torch.finfo(dots.dtype).max
+        dots = dots.masked_fill(mask, mask_value)
+
+        attn = self.attend(dots)
+
+        out = torch.matmul(attn, v)
+        out = rearrange(out, 'b h n d -> b n (h d)')
+        return self.to_out(out)
+
+class LSATransformer(nn.Module):
+    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout = 0.):
+        super().__init__()
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                PreNorm(dim, LSA(dim, heads = heads, dim_head = dim_head, dropout = dropout)),
+                PreNorm(dim, FeedForward(dim, mlp_dim, dropout = dropout))
+            ]))
+    def forward(self, x):
+        for attn, ff in self.layers:
+            x = attn(x) + x
+            x = ff(x) + x
+        return x
+
+class SPT(nn.Module):
+    def __init__(self, *, dim, patch_size, channels = 3):
+        super().__init__()
+        patch_dim = patch_size * patch_size * 5 * channels
+
+        self.to_patch_tokens = nn.Sequential(
+            Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = patch_size, p2 = patch_size),
+            nn.LayerNorm(patch_dim),
+            nn.Linear(patch_dim, dim)
+        )
+
+    def forward(self, x):
+        shifts = ((1, -1, 0, 0), (-1, 1, 0, 0), (0, 0, 1, -1), (0, 0, -1, 1))
+        shifted_x = list(map(lambda shift: F.pad(x, shift), shifts))
+        x_with_shifts = torch.cat((x, *shifted_x), dim = 1)
+        return self.to_patch_tokens(x_with_shifts)
+
 
 # https://mccormickml.com/2019/05/14/BERT-word-embeddings-tutorial/
 class ViTwithTextInput(nn.Module):
-    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, decoder_depth, language_transform_depth, heads, decoder_heads, language_transform_heads, mlp_dim, decoder_mlp_dim, language_transform_dim, text_dict_list, channels = 3, dim_head = 64, decoder_dim_head=64, language_transform_dim_head=64, dropout = 0., decoder_dropout = 0., language_transform_dropout = 0., emb_dropout = 0., text_seq_length = 64, unknown_char_loc='unknown.txt', text_padding_idx = 0, img_loss_weight = 1., text_loss_weight = 0.1, vector_loss_weight = 1.):
+    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, decoder_depth, language_transform_depth, heads, decoder_heads, language_transform_heads, mlp_dim, decoder_mlp_dim, language_transform_dim, text_dict_list, channels = 3, dim_head = 64, decoder_dim_head=64, language_transform_dim_head=64, dropout = 0., decoder_dropout = 0., language_transform_dropout = 0., emb_dropout = 0., text_seq_length = 64, unknown_char_loc='unknown.txt', text_padding_idx = 0, use_SPT=False, img_loss_weight = 1., text_loss_weight = 0.1, vector_loss_weight = 1.):
         super().__init__()
         # init text embedding layer
         self.text_dict_list = text_dict_list # a list of all possible characters (literally a dictionary).
@@ -151,16 +214,22 @@ class ViTwithTextInput(nn.Module):
         patch_dim = channels * self.patch_height * self.patch_width
         # assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
 
-        self.to_patch_embedding = nn.Sequential(
-            Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = self.patch_height, p2 = self.patch_width),
-            nn.Linear(patch_dim, dim),
-        )
+        if use_SPT:
+            self.to_patch_embedding = SPT(dim = dim, patch_size = patch_size, channels = channels)
+        else:
+            self.to_patch_embedding = nn.Sequential(
+                Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = self.patch_height, p2 = self.patch_width),
+                nn.Linear(patch_dim, dim),
+            )
 
         self.pos_embedding = nn.Parameter(torch.randn(1, self.num_patches + text_seq_length + 1, dim)) # we still keep the trainable pos_embedding as it is in the original ViT paper.
         self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
         self.dropout = nn.Dropout(emb_dropout)
 
-        self.encoder_transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
+        if use_SPT:
+            self.encoder_transformer = LSATransformer(dim, depth, heads, dim_head, mlp_dim, dropout) #TODO: check whether we do it here or just decoder also needs change?
+        else:
+            self.encoder_transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
         self.decoder_transformer = Transformer(dim, decoder_depth, decoder_heads, decoder_dim_head, decoder_mlp_dim, decoder_dropout)
         self.l1_to_l2_style_transformer = Transformer(dim, language_transform_depth, language_transform_heads, language_transform_dim_head, language_transform_dim, language_transform_dropout)
         self.l2_to_l1_style_transformer = Transformer(dim, language_transform_depth, language_transform_heads, language_transform_dim_head, language_transform_dim, language_transform_dropout)
