@@ -5,6 +5,9 @@ import codecs
 import pickle
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
+import numpy as np
+import torchvision.transforms as T
+from PIL import Image
 
 # helpers
 
@@ -714,3 +717,68 @@ class ViTwithTextInputHorizontal(nn.Module):
         decoded_x = self.decoding(x)
         pred_img = self.convert_to_img(decoded_x)
         return pred_img
+
+
+class ExperimentProcessing:
+    def __init__(self, image_size, normalize_mean=np.array([0.485, 0.456, 0.406]), normalize_std=np.array([0.229, 0.224, 0.225])):
+        self.image_size = image_size
+        self.normalize_mean = normalize_mean
+        self.normalize_std = normalize_std
+        self.encode_transform = T.Compose(
+            [
+                T.Resize(size=(image_size, image_size)), # h, w
+                T.ToTensor(),
+                T.Normalize(normalize_mean.tolist(), normalize_std.tolist()),
+            ]
+        )
+    
+    def preprocess_transform_imgs(self, pil_imgs):
+        """
+        pil_imgs: list of PIL.Image
+        """
+        img_sizes = [img.size for img in pil_imgs] # [(h, w)]
+        img_tensors = [self.encode_transform(pil_img) for pil_img in pil_imgs]
+        return img_tensors, img_sizes
+        
+    def preprocess_transform_imgs_paths(self, img_paths):
+        """
+        img_paths: list of str
+        """
+        pil_imgs = [Image.open(p) for p in img_paths]
+        return self.preprocess_transform_imgs(pil_imgs)
+    
+    def postprocess_transform_one_tensor(self, img_tensor, h=256, w=256):
+        """
+        img_tensor is one image tensor whose len of shape is 3.
+        """
+        decode_transform = T.Compose(
+            [
+                T.Normalize((-self.normalize_mean / self.normalize_std).tolist(), (1.0 / self.normalize_std).tolist()),
+                T.ToPILImage(),
+                T.Resize(size=(h, w)),
+            ]
+        )
+        pil_img = decode_transform(img_tensor)
+        # pil_img.save('pil_img.jpg')
+        return pil_img
+    
+    def postprocess_transform_tensors(self, img_tensors, img_sizes):
+        """
+        img_tensors: list of torch.Tensor or torch.Tensor of torch.Size([c, self.image_height, self.image_width])
+            or a torch.Tensor of torch.Size([img.shape[0], c, self.image_height, self.image_width])
+        img_sizes: list of (h, w)
+        """
+        assert len(img_tensors) == len(img_sizes)
+        converted_imgs = []
+        for i in range(len(img_tensors)):
+            converted_img = self.postprocess_transform_one_tensor(img_tensors[i], w=img_sizes[i][0], h=img_sizes[i][1])
+            converted_imgs.append(converted_img)
+        return converted_imgs
+        
+    
+    def postprocess_transform_tensors_paths(self, img_tensors, img_sizes, paths):
+        assert len(img_tensors) == len(img_sizes) and len(img_sizes) == len(paths)
+        converted_imgs = self.postprocess_transform_tensors(img_tensors, img_sizes)
+        for i in range(len(img_tensors)):
+            converted_imgs[i].save(paths[i])
+
