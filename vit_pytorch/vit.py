@@ -320,8 +320,8 @@ class ViTwithTextInputChinese(nn.Module):
         return torch.max(cos_sim, 2) # torch.Size(img.shape[0],text_seq_length)
     
     def convert_to_text(self, decoded_x):
-        min_vals, min_indices = self.get_text_maxs(decoded_x)
-        return self.indices_to_text(min_indices)
+        max_vals, max_indices = self.get_text_maxs(decoded_x)
+        return self.indices_to_text(max_indices)
     
     def compute_img_loss(self, orig_img, pred_img):
         """
@@ -492,7 +492,7 @@ class ViTwithTextInputHorizontal(nn.Module):
                 nn.Linear(patch_dim, dim),
             )
 
-        self.pos_embedding = nn.Parameter(torch.randn(1, self.num_patches + text_seq_length + 1, dim)) # we still keep the trainable pos_embedding as it is in the original ViT paper.
+        self.pos_embedding = nn.Parameter(torch.randn(1, self.cls_token_len + self.num_patches + self.intermediate_feature_vector_len + text_seq_length, dim)) # we still keep the trainable pos_embedding as it is in the original ViT paper.
         self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
         self.dropout = nn.Dropout(emb_dropout)
 
@@ -598,14 +598,15 @@ class ViTwithTextInputHorizontal(nn.Module):
         return torch.max(cos_sim, 2) # torch.Size(img.shape[0],text_seq_length)
     
     def convert_to_text(self, decoded_x):
-        min_vals, min_indices = self.get_text_maxs(decoded_x)
-        return self.indices_to_text(min_indices)
+        max_vals, max_indices = self.get_text_maxs(decoded_x)
+        return self.indices_to_text(max_indices)
     
-    def compute_img_loss(self, orig_img, pred_img):
+    def compute_img_loss(self, orig_img, pred_img, device='cpu'):
         """
-        orig_img is something after T.ToTensor(Image.open(p))
+        orig_img is a list of PIL.Image.Image
         """
-        return self.img_loss_weight * self.img_loss(orig_img, pred_img)
+        processed_imgs, size = self.processor.preprocess_transform_imgs(orig_img, device = device)
+        return self.img_loss_weight * self.img_loss(processed_imgs, pred_img)
     
     def compute_vector_loss(self, orig_vector, pred_vector):
         return self.vector_loss_weight * self.vector_loss(orig_vector, pred_vector)
@@ -628,12 +629,12 @@ class ViTwithTextInputHorizontal(nn.Module):
         decoded_intermediate_patches = self.get_intermediate_patches_from_x(decoded_x)
         if self.one_hot_dim.device != decoded_intermediate_patches.device:
             self.one_hot_dim = self.one_hot_dim.to(decoded_intermediate_patches.device)
-        target_indices = self.intermediate_feature_indices(language_labels, original_img_sizes, target_image_sizes, text_lens)
+        target_indices = self.intermediate_feature_indices(language_labels, original_img_sizes, target_image_sizes, text_lens, device=self.to_pixels.weight.device)
         cos_sim = torch.matmul(decoded_intermediate_patches, self.one_hot_dim) # torch.Size(img.shape[0], self.intermediate_feature_vector_len, dim)
-        pred_indices = torch.max(cos_sim, 2) # torch.Size(img.shape[0],self.intermediate_feature_vector_len)
-        return self.intermediate_feature_loss_weight * self.intermediate_feature_loss(target_indices, pred_indices)
+        pred_max_vals, pred_max_indices = torch.max(cos_sim, 2) # torch.Size(img.shape[0],self.intermediate_feature_vector_len)
+        return self.intermediate_feature_loss_weight * self.intermediate_feature_loss(target_indices.float(), pred_max_indices.float())
     
-    def intermediate_feature_indices(self, language_labels, original_img_sizes, target_image_sizes, text_lens):
+    def intermediate_feature_indices(self, language_labels, original_img_sizes, target_image_sizes, text_lens, device='cpu'):
         """[summary]
 
         Args:
@@ -660,7 +661,7 @@ class ViTwithTextInputHorizontal(nn.Module):
             b_indices.append(min(target_image_sizes[i][0], self.dim-1))
             b_indices.append(min(target_image_sizes[i][1], self.dim-1))
             indices.append(b_indices)
-        return torch.tensor(indices)
+        return torch.tensor(indices).to(device)
     
     def intermediate_feature_vectors(self, language_labels, original_img_sizes, target_image_sizes, text_lens, device='cpu'):
         """[summary]
@@ -673,7 +674,7 @@ class ViTwithTextInputHorizontal(nn.Module):
         Returns:
             [torch.Tensor]: torch.Size(img.shape[0], self.intermediate_feature_vector_len, dim)
         """
-        indices = self.intermediate_feature_indices(language_labels, original_img_sizes, target_image_sizes, text_lens)
+        indices = self.intermediate_feature_indices(language_labels, original_img_sizes, target_image_sizes, text_lens, device=self.to_pixels.weight.device)
         intermediate_features = torch.nn.functional.one_hot(indices, num_classes = self.dim).float().to(device)
         return intermediate_features
         
@@ -741,7 +742,7 @@ class ViTwithTextInputHorizontal(nn.Module):
         # l1 reconstruction loss
         l1_self_pred_img = self.convert_to_img(l1_decoded_x)
         l1_self_pred_text_patches = self.get_text_patches_from_x(l1_decoded_x)
-        loss1 = self.compute_img_loss(l1_imgs, l1_self_pred_img)
+        loss1 = self.compute_img_loss(l1_imgs, l1_self_pred_img, device=self.to_pixels.weight.device)
         loss2 = self.compute_text_loss(l1_texts, l1_self_pred_text_patches)
         loss17 = self.compute_intermediate_feature_loss(l1_decoded_x, l1_language_labels, l1_img_sizes, l1_img_sizes, l1_text_sizes)
         # l1_recon_loss = loss1 + loss2 + loss 17
@@ -752,7 +753,7 @@ class ViTwithTextInputHorizontal(nn.Module):
         # l2 reconstruction loss
         l2_self_pred_img = self.convert_to_img(l2_decoded_x)
         l2_self_pred_text_patches = self.get_text_patches_from_x(l2_decoded_x)
-        loss3 = self.compute_img_loss(l2_imgs, l2_self_pred_img)
+        loss3 = self.compute_img_loss(l2_imgs, l2_self_pred_img, device=self.to_pixels.weight.device)
         loss4 = self.compute_text_loss(l2_texts, l2_self_pred_text_patches)
         loss18 = self.compute_intermediate_feature_loss(l2_decoded_x, l2_language_labels, l2_img_sizes, l2_img_sizes, l2_text_sizes)
         # l2_recon_loss = loss3 + loss4 + loss18
@@ -785,7 +786,7 @@ class ViTwithTextInputHorizontal(nn.Module):
         l1_img_l2_text_decoded_x = self.decoding(l1_img_l2_text_x_p)
         l1_img_l2_text_pred_img = self.convert_to_img(l1_img_l2_text_decoded_x)
         l1_img_l2_text_pred_text_patches = self.get_text_patches_from_x(l1_img_l2_text_decoded_x)
-        loss11 = self.compute_img_loss(l2_imgs, l1_img_l2_text_pred_img)
+        loss11 = self.compute_img_loss(l2_imgs, l1_img_l2_text_pred_img, device=self.to_pixels.weight.device)
         loss12 = self.compute_text_loss(l2_texts, l1_img_l2_text_pred_text_patches)
         loss19 = self.compute_intermediate_feature_loss(l1_img_l2_text_decoded_x, l2_language_labels, l1_img_sizes, l2_img_sizes, l2_text_sizes)
         
@@ -800,7 +801,7 @@ class ViTwithTextInputHorizontal(nn.Module):
         l2_img_l1_text_decoded_x = self.decoding(l2_img_l1_text_x_p)
         l2_img_l1_text_pred_img = self.convert_to_img(l2_img_l1_text_decoded_x)
         l2_img_l1_text_pred_text_patches = self.get_text_patches_from_x(l2_img_l1_text_decoded_x)
-        loss15 = self.compute_img_loss(l1_imgs, l2_img_l1_text_pred_img)
+        loss15 = self.compute_img_loss(l1_imgs, l2_img_l1_text_pred_img, device=self.to_pixels.weight.device)
         loss16 = self.compute_text_loss(l1_texts, l2_img_l1_text_pred_text_patches)
         loss20 = self.compute_intermediate_feature_loss(l2_img_l1_text_decoded_x, l1_language_labels, l2_img_sizes, l1_img_sizes, l1_text_sizes)
         return loss1, loss2, loss3, loss4, loss5, loss6, loss7, loss8, loss9, loss10, loss11, loss12, loss13, loss14, loss15, loss16, loss17, loss18, loss19, loss20
