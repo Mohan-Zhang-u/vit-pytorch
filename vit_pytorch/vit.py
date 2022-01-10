@@ -624,20 +624,20 @@ class ViTwithTextInputHorizontal(nn.Module):
         target = rearrange(target, 'b n -> n b')
         return self.text_loss_weight * self.text_loss(cos_sim, target)
     
-    def compute_intermediate_feature_loss(self, decoded_x, language_label, original_img_sizes, target_image_sizes, text_lens):
+    def compute_intermediate_feature_loss(self, decoded_x, language_labels, original_img_sizes, target_image_sizes, text_lens):
         decoded_intermediate_patches = self.get_intermediate_patches_from_x(decoded_x)
         if self.one_hot_dim.device != decoded_intermediate_patches.device:
             self.one_hot_dim = self.one_hot_dim.to(decoded_intermediate_patches.device)
-        target_indices = self.intermediate_feature_indices(language_label, original_img_sizes, target_image_sizes, text_lens)
+        target_indices = self.intermediate_feature_indices(language_labels, original_img_sizes, target_image_sizes, text_lens)
         cos_sim = torch.matmul(decoded_intermediate_patches, self.one_hot_dim) # torch.Size(img.shape[0], self.intermediate_feature_vector_len, dim)
         pred_indices = torch.max(cos_sim, 2) # torch.Size(img.shape[0],self.intermediate_feature_vector_len)
         return self.intermediate_feature_loss_weight * self.intermediate_feature_loss(target_indices, pred_indices)
     
-    def intermediate_feature_indices(self, language_label, original_img_sizes, target_image_sizes, text_lens):
+    def intermediate_feature_indices(self, language_labels, original_img_sizes, target_image_sizes, text_lens):
         """[summary]
 
         Args:
-            language_label (str): 'l1' or 'l2'
+            language_labels (list of str): 'l1' or 'l2'
             original_img_sizes ([type]): [description]
             target_image_sizes ([type]): [description]
             texts ([type]): [description]
@@ -648,9 +648,9 @@ class ViTwithTextInputHorizontal(nn.Module):
         indices = []
         for i in len(original_img_sizes):
             b_indices = []
-            if language_label == 'l1':
+            if language_labels[i] == 'l1':
                 b_indices.append(0)
-            elif language_label == 'l2':
+            elif language_labels[i] == 'l2':
                 b_indices.append(self.dim-1)
             else:
                 raise ValueError('language_label should be either l1 or l2')
@@ -662,22 +662,22 @@ class ViTwithTextInputHorizontal(nn.Module):
             indices.append(b_indices)
         return torch.tensor(indices)
     
-    def intermediate_feature_vectors(self, language_label, original_img_sizes, target_image_sizes, text_lens):
+    def intermediate_feature_vectors(self, language_labels, original_img_sizes, target_image_sizes, text_lens):
         """[summary]
 
         Args:
-            language_label (str): 'l1' or 'l2'
+            language_labels (list of str): 'l1' or 'l2'
             original_img_sizes ([type]): [description]
             target_image_sizes ([type]): [description]
             texts ([type]): [description]
         Returns:
             [torch.Tensor]: torch.Size(img.shape[0], self.intermediate_feature_vector_len, dim)
         """
-        indices = self.intermediate_feature_indices(language_label, original_img_sizes, target_image_sizes, text_lens)
+        indices = self.intermediate_feature_indices(language_labels, original_img_sizes, target_image_sizes, text_lens)
         intermediate_features = torch.nn.functional.one_hot(indices, num_classes = self.dim).float()
         return intermediate_features
         
-    def encoding(self, imgs, texts, language_label, target_image_sizes):
+    def encoding(self, imgs, texts, language_labels, target_image_sizes):
         """[summary]
 
         Args:
@@ -691,7 +691,7 @@ class ViTwithTextInputHorizontal(nn.Module):
         assert len(imgs) == len(texts) and len(texts) == len(target_image_sizes)
         img_tensors, original_img_sizes = self.processor.preprocess_transform_imgs(imgs)
         x = self.to_patch_embedding(img_tensors) # torch.Size(img.shape[0], num_patches, dim)
-        intermediate_features = self.intermediate_feature_vectors(language_label, original_img_sizes, target_image_sizes, [len(text) for text in texts]) # torch.Size(img.shape[0], self.intermediate_feature_vector_len, dim)
+        intermediate_features = self.intermediate_feature_vectors(language_labels, original_img_sizes, target_image_sizes, [len(text) for text in texts]) # torch.Size(img.shape[0], self.intermediate_feature_vector_len, dim)
         indices = self.text_to_indices(texts) # torch.Size(img.shape[0], text_seq_length)
         x_text = torch.nn.functional.one_hot(indices, num_classes = self.dim) # torch.Size(img.shape[0], text_seq_length, dim) TODO: here, we pad len(self.text_dict_list) to self.dim, which is a huge waste of compute. Can we improve this?
         x = torch.cat((x, intermediate_features, x_text), dim=1) # torch.Size(img.shape[0], num_patches + self.intermediate_feature_vector_len + text_seq_length, dim)
@@ -716,16 +716,16 @@ class ViTwithTextInputHorizontal(nn.Module):
         decoded_x = self.decoder_transformer(x) # torch.Size(img.shape[0],1 +  num_patches + text_seq_length, dim)
         return decoded_x
     
-    def compute_loss(self, l1_imgs, l1_texts, l1_language_label, l2_imgs, l2_texts, l2_language_label):
+    def compute_loss(self, l1_imgs, l1_texts, l1_language_labels, l2_imgs, l2_texts, l2_language_labels):
         """[summary]
 
         Args:
             l1_imgs ([type]): a list of PIL.Image.Image
             l1_texts ([type]): a list of strings
-            l1_language_label ([type]): [description]
+            l1_language_labels ([type]): [description]
             l2_imgs ([type]): [description]
             l2_texts ([type]): [description]
-            l2_language_label ([type]): [description]
+            l2_language_labels ([type]): [description]
 
         Returns:
             [type]: losses
@@ -735,25 +735,25 @@ class ViTwithTextInputHorizontal(nn.Module):
         l1_text_sizes = [len(text) for text in l1_texts]
         l2_text_sizes = [len(text) for text in l2_texts]
         # l1 reconstruction.
-        l1_x = self.encoding(l1_imgs, l1_texts, l1_language_label, l1_img_sizes)
+        l1_x = self.encoding(l1_imgs, l1_texts, l1_language_labels, l1_img_sizes)
         l1_decoded_x = self.decoding(l1_x)
         # l1 reconstruction loss
         l1_self_pred_img = self.convert_to_img(l1_decoded_x)
         l1_self_pred_text_patches = self.get_text_patches_from_x(l1_decoded_x)
         loss1 = self.compute_img_loss(l1_imgs, l1_self_pred_img)
         loss2 = self.compute_text_loss(l1_texts, l1_self_pred_text_patches)
-        loss17 = self.compute_intermediate_feature_loss(l1_decoded_x, l1_language_label, l1_img_sizes, l1_img_sizes, l1_text_sizes)
+        loss17 = self.compute_intermediate_feature_loss(l1_decoded_x, l1_language_labels, l1_img_sizes, l1_img_sizes, l1_text_sizes)
         # l1_recon_loss = loss1 + loss2 + loss 17
         
         # l2 reconstruction.
-        l2_x = self.encoding(l2_imgs, l2_texts, l2_language_label, l2_img_sizes)
+        l2_x = self.encoding(l2_imgs, l2_texts, l2_language_labels, l2_img_sizes)
         l2_decoded_x = self.decoding(l2_x)
         # l2 reconstruction loss
         l2_self_pred_img = self.convert_to_img(l2_decoded_x)
         l2_self_pred_text_patches = self.get_text_patches_from_x(l2_decoded_x)
         loss3 = self.compute_img_loss(l2_imgs, l2_self_pred_img)
         loss4 = self.compute_text_loss(l2_texts, l2_self_pred_text_patches)
-        loss18 = self.compute_intermediate_feature_loss(l2_decoded_x, l2_language_label, l2_img_sizes, l2_img_sizes, l2_text_sizes)
+        loss18 = self.compute_intermediate_feature_loss(l2_decoded_x, l2_language_labels, l2_img_sizes, l2_img_sizes, l2_text_sizes)
         # l2_recon_loss = loss3 + loss4 + loss18
         
         # Z vector consistency loss.
@@ -773,7 +773,7 @@ class ViTwithTextInputHorizontal(nn.Module):
         loss8 = self.compute_vector_loss(l2_zs, l1_zsp)
         
         # twist language text loss.
-        l1_img_l2_text_x = self.encoding(l1_imgs, l2_texts, l2_language_label, l2_img_sizes)
+        l1_img_l2_text_x = self.encoding(l1_imgs, l2_texts, l2_language_labels, l2_img_sizes)
         zs3 = self.get_style_vector(l1_img_l2_text_x)
         zc3 = self.get_semantic_vector(l1_img_l2_text_x)
         loss9 = self.compute_vector_loss(l1_zs, zs3)
@@ -786,9 +786,9 @@ class ViTwithTextInputHorizontal(nn.Module):
         l1_img_l2_text_pred_text_patches = self.get_text_patches_from_x(l1_img_l2_text_decoded_x)
         loss11 = self.compute_img_loss(l2_imgs, l1_img_l2_text_pred_img)
         loss12 = self.compute_text_loss(l2_texts, l1_img_l2_text_pred_text_patches)
-        loss19 = self.compute_intermediate_feature_loss(l1_img_l2_text_decoded_x, l2_language_label, l1_img_sizes, l2_img_sizes, l2_text_sizes)
+        loss19 = self.compute_intermediate_feature_loss(l1_img_l2_text_decoded_x, l2_language_labels, l1_img_sizes, l2_img_sizes, l2_text_sizes)
         
-        l2_img_l1_text_x = self.encoding(l2_imgs, l1_texts, l1_language_label, l1_img_sizes)
+        l2_img_l1_text_x = self.encoding(l2_imgs, l1_texts, l1_language_labels, l1_img_sizes)
         zs4 = self.get_style_vector(l2_img_l1_text_x)
         zc4 = self.get_semantic_vector(l2_img_l1_text_x)
         loss13 = self.compute_vector_loss(l2_zs, zs4)
@@ -801,11 +801,11 @@ class ViTwithTextInputHorizontal(nn.Module):
         l2_img_l1_text_pred_text_patches = self.get_text_patches_from_x(l2_img_l1_text_decoded_x)
         loss15 = self.compute_img_loss(l1_imgs, l2_img_l1_text_pred_img)
         loss16 = self.compute_text_loss(l1_texts, l2_img_l1_text_pred_text_patches)
-        loss20 = self.compute_intermediate_feature_loss(l2_img_l1_text_decoded_x, l1_language_label, l2_img_sizes, l1_img_sizes, l1_text_sizes)
+        loss20 = self.compute_intermediate_feature_loss(l2_img_l1_text_decoded_x, l1_language_labels, l2_img_sizes, l1_img_sizes, l1_text_sizes)
         return loss1, loss2, loss3, loss4, loss5, loss6, loss7, loss8, loss9, loss10, loss11, loss12, loss13, loss14, loss15, loss16, loss17, loss18, loss19, loss20
         
-    def forward(self, l1_imgs, l2_texts, l2_language_label, target_image_sizes):
-        l1_img_l2_text_x = self.encoding(l1_imgs, l2_texts, l2_language_label, target_image_sizes)
+    def forward(self, l1_imgs, l2_texts, l2_language_labels, target_image_sizes):
+        l1_img_l2_text_x = self.encoding(l1_imgs, l2_texts, l2_language_labels, target_image_sizes)
         zs3 = self.get_style_vector(l1_img_l2_text_x)
         zc3 = self.get_semantic_vector(l1_img_l2_text_x)
         zs3_p = self.l1_to_l2_style_transformer(zs3)
@@ -815,10 +815,10 @@ class ViTwithTextInputHorizontal(nn.Module):
         converted_imgs = self.processor.postprocess_transform_tensors(l1_img_l2_text_pred_img, target_image_sizes)
         return converted_imgs
     
-    def forward_reconstruct(self, l1_imgs, l1_texts, l1_language_label):
+    def forward_reconstruct(self, l1_imgs, l1_texts, l1_language_labels):
         l1_img_sizes =  [img.size for img in l1_imgs]
         l1_text_sizes = [len(text) for text in l1_texts]
-        x = self.encoding(l1_imgs, l1_texts, l1_language_label, l1_img_sizes)
+        x = self.encoding(l1_imgs, l1_texts, l1_language_labels, l1_img_sizes)
         decoded_x = self.decoding(x)
         pred_img = self.convert_to_img(decoded_x)
         converted_imgs = self.processor.postprocess_transform_tensors(pred_img, l1_img_sizes)
