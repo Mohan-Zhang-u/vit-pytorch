@@ -646,7 +646,7 @@ class ViTwithTextInputHorizontal(nn.Module):
         """
         assert len(original_img_sizes) == len(target_image_sizes) and len(target_image_sizes) == len(text_lens)
         indices = []
-        for i in len(original_img_sizes):
+        for i in range(len(original_img_sizes)):
             b_indices = []
             if language_labels[i] == 'l1':
                 b_indices.append(0)
@@ -654,15 +654,15 @@ class ViTwithTextInputHorizontal(nn.Module):
                 b_indices.append(self.dim-1)
             else:
                 raise ValueError('language_label should be either l1 or l2')
-            b_indices.append(text_lens[i])
-            b_indices.append(original_img_sizes[i][0])
-            b_indices.append(original_img_sizes[i][1])
-            b_indices.append(target_image_sizes[i][0])
-            b_indices.append(target_image_sizes[i][1])
+            b_indices.append(min(text_lens[i], self.dim-1))
+            b_indices.append(min(original_img_sizes[i][0], self.dim-1))
+            b_indices.append(min(original_img_sizes[i][1], self.dim-1))
+            b_indices.append(min(target_image_sizes[i][0], self.dim-1))
+            b_indices.append(min(target_image_sizes[i][1], self.dim-1))
             indices.append(b_indices)
         return torch.tensor(indices)
     
-    def intermediate_feature_vectors(self, language_labels, original_img_sizes, target_image_sizes, text_lens):
+    def intermediate_feature_vectors(self, language_labels, original_img_sizes, target_image_sizes, text_lens, device='cpu'):
         """[summary]
 
         Args:
@@ -674,7 +674,7 @@ class ViTwithTextInputHorizontal(nn.Module):
             [torch.Tensor]: torch.Size(img.shape[0], self.intermediate_feature_vector_len, dim)
         """
         indices = self.intermediate_feature_indices(language_labels, original_img_sizes, target_image_sizes, text_lens)
-        intermediate_features = torch.nn.functional.one_hot(indices, num_classes = self.dim).float()
+        intermediate_features = torch.nn.functional.one_hot(indices, num_classes = self.dim).float().to(device)
         return intermediate_features
         
     def encoding(self, imgs, texts, language_labels, target_image_sizes):
@@ -689,9 +689,10 @@ class ViTwithTextInputHorizontal(nn.Module):
             [type]: [description]
         """
         assert len(imgs) == len(texts) and len(texts) == len(target_image_sizes)
-        img_tensors, original_img_sizes = self.processor.preprocess_transform_imgs(imgs)
+        img_tensors, original_img_sizes = self.processor.preprocess_transform_imgs(imgs, device=self.to_pixels.weight.device)
+        img_tensors = img_tensors
         x = self.to_patch_embedding(img_tensors) # torch.Size(img.shape[0], num_patches, dim)
-        intermediate_features = self.intermediate_feature_vectors(language_labels, original_img_sizes, target_image_sizes, [len(text) for text in texts]) # torch.Size(img.shape[0], self.intermediate_feature_vector_len, dim)
+        intermediate_features = self.intermediate_feature_vectors(language_labels, original_img_sizes, target_image_sizes, [len(text) for text in texts], device=self.to_pixels.weight.device) # torch.Size(img.shape[0], self.intermediate_feature_vector_len, dim)
         indices = self.text_to_indices(texts) # torch.Size(img.shape[0], text_seq_length)
         x_text = torch.nn.functional.one_hot(indices, num_classes = self.dim) # torch.Size(img.shape[0], text_seq_length, dim) TODO: here, we pad len(self.text_dict_list) to self.dim, which is a huge waste of compute. Can we improve this?
         x = torch.cat((x, intermediate_features, x_text), dim=1) # torch.Size(img.shape[0], num_patches + self.intermediate_feature_vector_len + text_seq_length, dim)
@@ -722,7 +723,7 @@ class ViTwithTextInputHorizontal(nn.Module):
         Args:
             l1_imgs ([type]): a list of PIL.Image.Image
             l1_texts ([type]): a list of strings
-            l1_language_labels ([type]): [description]
+            l1_language_labels ([type]): a list of 'l1' or 'l2'
             l2_imgs ([type]): [description]
             l2_texts ([type]): [description]
             l2_language_labels ([type]): [description]
@@ -805,6 +806,18 @@ class ViTwithTextInputHorizontal(nn.Module):
         return loss1, loss2, loss3, loss4, loss5, loss6, loss7, loss8, loss9, loss10, loss11, loss12, loss13, loss14, loss15, loss16, loss17, loss18, loss19, loss20
         
     def forward(self, l1_imgs, l2_texts, l2_language_labels, target_image_sizes):
+        """[summary]
+
+        Args:
+            l1_imgs ([type]): a list of PIL.Image.Image
+            l2_texts ([type]): a list of strings
+            l2_language_labels ([type]): a list of 'l1' or 'l2'
+            target_image_sizes ([type]): a list of (w, h)
+
+        Returns:
+            [type]: a list of PIL.Image.Image
+        """
+        assert len(l1_imgs) == len(l2_texts) and len(l2_texts) == len(l2_language_labels) and len(l2_language_labels) == len(target_image_sizes)
         l1_img_l2_text_x = self.encoding(l1_imgs, l2_texts, l2_language_labels, target_image_sizes)
         zs3 = self.get_style_vector(l1_img_l2_text_x)
         zc3 = self.get_semantic_vector(l1_img_l2_text_x)
@@ -816,6 +829,17 @@ class ViTwithTextInputHorizontal(nn.Module):
         return converted_imgs
     
     def forward_reconstruct(self, l1_imgs, l1_texts, l1_language_labels):
+        """[summary]
+
+        Args:
+            l1_imgs ([type]): a list of PIL.Image.Image
+            l1_texts ([type]): a list of strings
+            l1_language_labels ([type]): a list of 'l1' or 'l2'
+
+        Returns:
+            [type]: a list of PIL.Image.Image and a list of strings
+        """
+        assert len(l1_imgs) == len(l1_texts) and len(l1_texts) == len(l1_language_labels)
         l1_img_sizes =  [img.size for img in l1_imgs]
         l1_text_sizes = [len(text) for text in l1_texts]
         x = self.encoding(l1_imgs, l1_texts, l1_language_labels, l1_img_sizes)
@@ -839,12 +863,13 @@ class ExperimentProcessor:
             ]
         )
     
-    def preprocess_transform_imgs(self, pil_imgs):
+    def preprocess_transform_imgs(self, pil_imgs, device='cpu'):
         """
         pil_imgs: list of PIL.Image
         """
         img_sizes = [img.size for img in pil_imgs] # [(w, h)]
         img_tensors = [self.encode_transform(pil_img) for pil_img in pil_imgs]
+        img_tensors = torch.stack(img_tensors).to(device)
         return img_tensors, img_sizes
     
     def postprocess_transform_one_tensor(self, img_tensor, h=256, w=256):
@@ -875,16 +900,16 @@ class ExperimentProcessor:
             converted_imgs.append(converted_img)
         return converted_imgs
         
-    def preprocess_transform_imgs_paths(self, img_paths):
-        """
-        img_paths: list of str
-        """
-        pil_imgs = [Image.open(p) for p in img_paths]
-        return self.preprocess_transform_imgs(pil_imgs)
+    # def preprocess_transform_imgs_paths(self, img_paths):
+    #     """
+    #     img_paths: list of str
+    #     """
+    #     pil_imgs = [Image.open(p) for p in img_paths]
+    #     return self.preprocess_transform_imgs(pil_imgs)
     
-    def postprocess_transform_tensors_paths(self, img_tensors, img_sizes, paths):
-        assert len(img_tensors) == len(img_sizes) and len(img_sizes) == len(paths)
-        converted_imgs = self.postprocess_transform_tensors(img_tensors, img_sizes)
-        for i in range(len(img_tensors)):
-            converted_imgs[i].save(paths[i])
+    # def postprocess_transform_tensors_paths(self, img_tensors, img_sizes, paths):
+    #     assert len(img_tensors) == len(img_sizes) and len(img_sizes) == len(paths)
+    #     converted_imgs = self.postprocess_transform_tensors(img_tensors, img_sizes)
+    #     for i in range(len(img_tensors)):
+    #         converted_imgs[i].save(paths[i])
 
