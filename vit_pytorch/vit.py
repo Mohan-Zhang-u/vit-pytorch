@@ -464,7 +464,7 @@ class ViTwithTextInputHorizontal(nn.Module):
         self.num_classes = num_classes
         self.dim = dim # both encoder dim and decoder dim.
         self.text_dict_length = len(text_dict_list)
-        self.text_embedding_layer = torch.nn.Embedding(num_embeddings=self.text_dict_length, embedding_dim=dim, padding_idx=text_padding_idx, max_norm=1., norm_type=2.) # https://stats.stackexchange.com/questions/177905/should-i-normalize-word2vecs-word-vectors-before-using-them
+        self.text_embedding_layer = torch.nn.functional.one_hot(torch.tensor(list(range(self.dim))), num_classes = self.dim).float() # torch.Size(img.shape[0], text_seq_length, dim) TODO: here, we pad len(self.text_dict_list) to self.dim, which is a huge waste of compute. Can we improve this?
         
         self.image_height, self.image_width = pair(image_size)
         self.patch_height, self.patch_width = pair(patch_size)
@@ -554,7 +554,7 @@ class ViTwithTextInputHorizontal(nn.Module):
     def get_img_patches_from_x(self, x):
         return x[:, 1:1+self.num_patches]
     
-    def get_text_patches_from_x(self, x):
+    def get_text_patches_from_x(self, x): # TODO:
         return x[:, 1+self.num_patches:]
     
     def get_style_vector(self, x):
@@ -574,8 +574,7 @@ class ViTwithTextInputHorizontal(nn.Module):
     
     def get_text_mins(self, decoded_x):
         text_patches = self.get_text_patches_from_x(decoded_x) # torch.Size(img.shape[0],text_seq_length, dim)
-        embed_weight_t = rearrange(self.text_embedding_layer.weight.detach().clone(), 'b n -> n b')
-        cos_sim = torch.matmul(text_patches, embed_weight_t) # torch.Size(img.shape[0],text_seq_length, self.text_dict_length)
+        cos_sim = torch.matmul(text_patches, self.text_embedding_layer) # torch.Size(img.shape[0],text_seq_length, self.text_dict_length)
         return torch.min(cos_sim, 2) # torch.Size(img.shape[0],text_seq_length)
     
     def convert_to_text(self, decoded_x):
@@ -594,13 +593,14 @@ class ViTwithTextInputHorizontal(nn.Module):
     def compute_text_loss(self, orig_text, pred_text_tensor):
         """
         orig_text are list of strings.
-        pred_text_tensor should be a result of get_text_patches_from_x(decoded_x)
+        pred_text_tensor should be a result of get_text_patches_from_x(decoded_x) # torch.Size([img.shape[0],text_seq_length, self.dim])
         """
+        if self.text_embedding_layer.device != pred_text_tensor.device:
+            self.text_embedding_layer = self.text_embedding_layer.to(pred_text_tensor.device)
         target = self.text_to_indices(orig_text)
-        embed_weight_t = rearrange(self.text_embedding_layer.weight.detach().clone(), 'b n -> n b') # otherwise triggers RuntimeError: one of the variables needed for gradient computation has been modified by an inplace operation
-        cos_sim = torch.matmul(pred_text_tensor, embed_weight_t)
+        cos_sim = torch.matmul(pred_text_tensor, self.text_embedding_layer)
         # shift batch size to be d_K
-        cos_sim = rearrange(cos_sim, 'b n c -> n c b')
+        cos_sim = rearrange(cos_sim, 'b n c -> n c b') # torch.Size(img.shape[0], text_seq_length, dim)
         target = rearrange(target, 'b n -> n b')
         return self.text_loss_weight * self.text_loss(cos_sim, target)
         
@@ -608,7 +608,8 @@ class ViTwithTextInputHorizontal(nn.Module):
         # both img and text are batchified.
         x = self.to_patch_embedding(img) # torch.Size(img.shape[0], num_patches, dim)
         indices = self.text_to_indices(text) # torch.Size(img.shape[0], text_seq_length)
-        x_text = self.text_embedding_layer(indices) # torch.Size(img.shape[0], text_seq_length, dim)
+        x_text = torch.nn.functional.one_hot(indices, num_classes = self.dim) # torch.Size(img.shape[0], text_seq_length, dim) TODO: here, we pad len(self.text_dict_list) to self.dim, which is a huge waste of compute. Can we improve this?
+        # x_text = self.text_embedding_layer(indices) # torch.Size(img.shape[0], text_seq_length, dim)
         x = torch.cat((x, x_text), dim=1) # torch.Size(img.shape[0], num_patches + text_seq_length, dim)
         b, n, _ = x.shape
 
