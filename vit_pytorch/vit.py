@@ -459,6 +459,9 @@ class ViTwithTextInputHorizontal(nn.Module):
     def __init__(self, *, image_size, patch_size, num_classes, dim, depth, decoder_depth, language_transform_depth, heads, decoder_heads, language_transform_heads, mlp_dim, decoder_mlp_dim, language_transform_dim, text_dict_list, channels = 3, dim_head = 64, decoder_dim_head=64, language_transform_dim_head=64, dropout = 0., decoder_dropout = 0., language_transform_dropout = 0., emb_dropout = 0., text_seq_length = 64, unknown_char_loc='unknown.txt', text_padding_idx = 0, use_SPT=False, img_loss_weight = 1., text_loss_weight = 0.1, vector_loss_weight = 1.):
         super().__init__()
         # init text embedding layer
+        self.cls_token_len = 1
+        self.intermediate_feature_vector_len = 1 + 1 + 2 + 2
+        # shape of x should be torch.Size(img.shape[0], self.cls_token_len + num_patches + self.intermediate_feature_vector_len + text_seq_length, dim)
         self.text_dict_list = text_dict_list # a list of all possible characters (literally a dictionary).
         self.text_seq_length = text_seq_length
         self.unknown_char_loc = unknown_char_loc
@@ -468,6 +471,7 @@ class ViTwithTextInputHorizontal(nn.Module):
         self.dim = dim # both encoder dim and decoder dim.
         self.text_dict_length = len(text_dict_list)
         self.text_embedding_layer = torch.nn.functional.one_hot(torch.tensor(list(range(self.dim))), num_classes = self.dim).float() # torch.Size(img.shape[0], text_seq_length, dim) TODO: here, we pad len(self.text_dict_list) to self.dim, which is a huge waste of compute. Can we improve this?
+        self.processor = ExperimentProcessor(image_size=image_size)
         
         self.image_height, self.image_width = pair(image_size)
         self.patch_height, self.patch_width = pair(patch_size)
@@ -606,22 +610,64 @@ class ViTwithTextInputHorizontal(nn.Module):
         cos_sim = rearrange(cos_sim, 'b n c -> n c b') # torch.Size(img.shape[0], text_seq_length, dim)
         target = rearrange(target, 'b n -> n b')
         return self.text_loss_weight * self.text_loss(cos_sim, target)
+    
+    def intermediate_feature_vectors(self, language_label, original_img_sizes, target_image_sizes, texts):
+        """[summary]
+
+        Args:
+            language_label (str): 'l1' or 'l2'
+            original_img_sizes ([type]): [description]
+            target_image_sizes ([type]): [description]
+            texts ([type]): [description]
+        Returns:
+            [torch.Tensor]: torch.Size(img.shape[0], self.intermediate_feature_vector_len, dim)
+        """
+        assert len(original_img_sizes) == len(target_image_sizes) and len(target_image_sizes) == len(texts)
+        indices = []
+        for i in len(original_img_sizes):
+            b_indices = []
+            if language_label == 'l1':
+                b_indices.append(0)
+            elif language_label == 'l2':
+                b_indices.append(self.dim-1)
+            else:
+                raise ValueError('language_label should be either l1 or l2')
+            b_indices.append(len(texts[i]))
+            b_indices.append(original_img_sizes[i][0])
+            b_indices.append(original_img_sizes[i][1])
+            b_indices.append(target_image_sizes[i][0])
+            b_indices.append(target_image_sizes[i][1])
+            indices.append(b_indices)
+                
+        intermediate_features = torch.nn.functional.one_hot(torch.tensor(indices), num_classes = self.dim).float()
+        return intermediate_features
         
-    def encoding(self, img, text):
-        # both img and text are batchified.
-        x = self.to_patch_embedding(img) # torch.Size(img.shape[0], num_patches, dim)
-        indices = self.text_to_indices(text) # torch.Size(img.shape[0], text_seq_length)
+    def encoding(self, imgs, texts, language_label, target_image_sizes):
+        """[summary]
+
+        Args:
+            imgs ([type]): a list of PIL.Image.Image
+            texts ([type]): a list of strings.
+            target_image_sizes ([type]): a list of (w, h)
+
+        Returns:
+            [type]: [description]
+        """
+        assert len(imgs) == len(texts) and len(texts) == len(target_image_sizes)
+        img_tensors, original_img_sizes = self.processor.preprocess_transform_imgs(imgs)
+        x = self.to_patch_embedding(img_tensors) # torch.Size(img.shape[0], num_patches, dim)
+        intermediate_features = self.intermediate_feature_vectors(language_label, original_img_sizes, target_image_sizes, texts) # torch.Size(img.shape[0], self.intermediate_feature_vector_len, dim)
+        indices = self.text_to_indices(texts) # torch.Size(img.shape[0], text_seq_length)
         x_text = torch.nn.functional.one_hot(indices, num_classes = self.dim) # torch.Size(img.shape[0], text_seq_length, dim) TODO: here, we pad len(self.text_dict_list) to self.dim, which is a huge waste of compute. Can we improve this?
-        # x_text = self.text_embedding_layer(indices) # torch.Size(img.shape[0], text_seq_length, dim)
-        x = torch.cat((x, x_text), dim=1) # torch.Size(img.shape[0], num_patches + text_seq_length, dim)
+        x = torch.cat((x, intermediate_features, x_text), dim=1) # torch.Size(img.shape[0], num_patches + self.intermediate_feature_vector_len + text_seq_length, dim)
         b, n, _ = x.shape
 
-        cls_tokens = repeat(self.cls_token, '() n d -> b n d', b = b) # torch.Size(img.shape[0], 1, dim)
-        x = torch.cat((cls_tokens, x), dim=1) # torch.Size(img.shape[0],1 +  num_patches + text_seq_length, dim)
-        x += self.pos_embedding[:, :(n + 1)] # torch.Size(img.shape[0],1 +  num_patches + text_seq_length, dim)
-        x = self.dropout(x) # torch.Size(img.shape[0],1 + num_patches + text_seq_length, dim)
+        cls_tokens = repeat(self.cls_token, '() n d -> b n d', b = b) # torch.Size(img.shape[0], self.cls_token_len, dim)
+        x = torch.cat((cls_tokens, x), dim=1) # torch.Size(img.shape[0], self.cls_token_len + num_patches + self.intermediate_feature_vector_len + text_seq_length, dim)
+        x += self.pos_embedding[:, :(n + 1)] # torch.Size(img.shape[0], self.cls_token_len + num_patches + self.intermediate_feature_vector_len + text_seq_length, dim)
+        x = self.dropout(x) # torch.Size(img.shape[0], self.cls_token_len + num_patches + self.intermediate_feature_vector_len + text_seq_length, dim)
 
-        x = self.encoder_transformer(x) # torch.Size(img.shape[0],1 +  num_patches + text_seq_length, dim)
+        x = self.encoder_transformer(x) # torch.Size(img.shape[0], self.cls_token_len + num_patches + self.intermediate_feature_vector_len + text_seq_length, dim)
 
         # x = x.mean(dim = 1) if self.pool == 'mean' else x[:, 0] # torch.Size(img.shape[0], dim)
 
@@ -702,7 +748,7 @@ class ViTwithTextInputHorizontal(nn.Module):
         loss16 = self.compute_text_loss(l1_texts, l2_img_l1_text_pred_text_patches)
         return loss1, loss2, loss3, loss4, loss5, loss6, loss7, loss8, loss9, loss10, loss11, loss12, loss13, loss14, loss15, loss16
         
-    def forward(self, l1_imgs, l2_texts):
+    def forward(self, l1_imgs, l2_texts, target_image_sizes):
         l1_img_l2_text_x = self.encoding(l1_imgs, l2_texts)
         zs3 = self.get_style_vector(l1_img_l2_text_x)
         zc3 = self.get_semantic_vector(l1_img_l2_text_x)
@@ -719,7 +765,7 @@ class ViTwithTextInputHorizontal(nn.Module):
         return pred_img
 
 
-class ExperimentProcessing:
+class ExperimentProcessor:
     def __init__(self, image_size, normalize_mean=np.array([0.485, 0.456, 0.406]), normalize_std=np.array([0.229, 0.224, 0.225])):
         self.image_size = image_size
         self.normalize_mean = normalize_mean
@@ -736,16 +782,9 @@ class ExperimentProcessing:
         """
         pil_imgs: list of PIL.Image
         """
-        img_sizes = [img.size for img in pil_imgs] # [(h, w)]
+        img_sizes = [img.size for img in pil_imgs] # [(w, h)]
         img_tensors = [self.encode_transform(pil_img) for pil_img in pil_imgs]
         return img_tensors, img_sizes
-        
-    def preprocess_transform_imgs_paths(self, img_paths):
-        """
-        img_paths: list of str
-        """
-        pil_imgs = [Image.open(p) for p in img_paths]
-        return self.preprocess_transform_imgs(pil_imgs)
     
     def postprocess_transform_one_tensor(self, img_tensor, h=256, w=256):
         """
@@ -766,7 +805,7 @@ class ExperimentProcessing:
         """
         img_tensors: list of torch.Tensor or torch.Tensor of torch.Size([c, self.image_height, self.image_width])
             or a torch.Tensor of torch.Size([img.shape[0], c, self.image_height, self.image_width])
-        img_sizes: list of (h, w)
+        img_sizes: list of (w, h)
         """
         assert len(img_tensors) == len(img_sizes)
         converted_imgs = []
@@ -775,6 +814,12 @@ class ExperimentProcessing:
             converted_imgs.append(converted_img)
         return converted_imgs
         
+    def preprocess_transform_imgs_paths(self, img_paths):
+        """
+        img_paths: list of str
+        """
+        pil_imgs = [Image.open(p) for p in img_paths]
+        return self.preprocess_transform_imgs(pil_imgs)
     
     def postprocess_transform_tensors_paths(self, img_tensors, img_sizes, paths):
         assert len(img_tensors) == len(img_sizes) and len(img_sizes) == len(paths)
