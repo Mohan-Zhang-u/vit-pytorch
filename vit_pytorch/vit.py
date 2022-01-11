@@ -924,17 +924,3 @@ class ExperimentProcessor:
             converted_img = self.postprocess_transform_one_tensor(img_tensors[i], w=img_sizes[i][0], h=img_sizes[i][1])
             converted_imgs.append(converted_img)
         return converted_imgs
-        
-    # def preprocess_transform_imgs_paths(self, img_paths):
-    #     """
-    #     img_paths: list of str
-    #     """
-    #     pil_imgs = [Image.open(p) for p in img_paths]
-    #     return self.preprocess_transform_imgs(pil_imgs)
-    
-    # def postprocess_transform_tensors_paths(self, img_tensors, img_sizes, paths):
-    #     assert len(img_tensors) == len(img_sizes) and len(img_sizes) == len(paths)
-    #     converted_imgs = self.postprocess_transform_tensors(img_tensors, img_sizes)
-    #     for i in range(len(img_tensors)):
-    #         converted_imgs[i].save(paths[i])
-
