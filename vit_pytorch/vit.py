@@ -859,17 +859,26 @@ class ViTwithTextInputHorizontal(nn.Module):
 
 
 class ExperimentProcessor:
-    def __init__(self, image_size, normalize_mean=np.array([0.485, 0.456, 0.406]), normalize_std=np.array([0.229, 0.224, 0.225])):
+    def __init__(self, image_size, normalize=True, normalize_mean=np.array([0.485, 0.456, 0.406]), normalize_std=np.array([0.229, 0.224, 0.225])):
         self.image_size = image_size
+        self.normalize = normalize
         self.normalize_mean = normalize_mean
         self.normalize_std = normalize_std
-        self.encode_transform = T.Compose(
-            [
-                T.Resize(size=(image_size, image_size)), # h, w
-                T.ToTensor(),
-                T.Normalize(normalize_mean.tolist(), normalize_std.tolist()),
-            ]
-        )
+        if self.normalize:
+            self.encode_transform = T.Compose(
+                [
+                    T.Resize(size=(image_size, image_size)), # h, w
+                    T.ToTensor(),
+                    T.Normalize(normalize_mean.tolist(), normalize_std.tolist()),
+                ]
+            )
+        else:
+            self.encode_transform = T.Compose(
+                [
+                    T.Resize(size=(image_size, image_size)), # h, w
+                    T.ToTensor(),
+                ]
+            )
     
     def preprocess_transform_imgs(self, pil_imgs, device='cpu'):
         """
@@ -884,13 +893,21 @@ class ExperimentProcessor:
         """
         img_tensor is one image tensor whose len of shape is 3.
         """
-        decode_transform = T.Compose(
-            [
-                T.Normalize((-self.normalize_mean / self.normalize_std).tolist(), (1.0 / self.normalize_std).tolist()),
-                T.ToPILImage(),
-                T.Resize(size=(h, w)),
-            ]
-        )
+        if self.normalize:
+            decode_transform = T.Compose(
+                [
+                    T.Normalize((-self.normalize_mean / self.normalize_std).tolist(), (1.0 / self.normalize_std).tolist()),
+                    T.ToPILImage(),
+                    T.Resize(size=(h, w)),
+                ]
+            )
+        else:
+            decode_transform = T.Compose(
+                [
+                    T.ToPILImage(),
+                    T.Resize(size=(h, w)),
+                ]
+            )
         pil_img = decode_transform(img_tensor)
         # pil_img.save('pil_img.jpg')
         return pil_img
