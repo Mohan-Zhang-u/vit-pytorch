@@ -443,6 +443,7 @@ class ViTwithTextInputChinese(nn.Module):
         l1_img_l2_text_x = self.encoding(l1_imgs, l2_texts)
         zs3 = self.get_style_vector(l1_img_l2_text_x)
         zc3 = self.get_semantic_vector(l1_img_l2_text_x)
+        raise ValueError('need to check for language label to confirm which style_transformer to use')
         zs3_p = self.l1_to_l2_style_transformer(zs3)
         l1_img_l2_text_x_p = self.cat_style_and_semantic_vectors(zs3_p, zc3)
         l1_img_l2_text_decoded_x = self.decoding(l1_img_l2_text_x_p)
@@ -822,7 +823,13 @@ class ViTwithTextInputHorizontal(nn.Module):
         l1_img_l2_text_x = self.encoding(l1_imgs, l2_texts, l2_language_labels, target_image_sizes)
         zs3 = self.get_style_vector(l1_img_l2_text_x)
         zc3 = self.get_semantic_vector(l1_img_l2_text_x)
-        zs3_p = self.l1_to_l2_style_transformer(zs3)
+        assert l2_language_labels.count(l2_language_labels[0]) == len(l2_language_labels) # all elements in l2_language_labels are equal.
+        if l2_language_labels[0] == 'l1':
+            zs3_p = self.l2_to_l1_style_transformer(zs3)
+        elif l2_language_labels[0] == 'l2':
+            zs3_p = self.l1_to_l2_style_transformer(zs3)
+        else:
+            raise ValueError('l2_language_label must be either "l1" or "l2"')
         l1_img_l2_text_x_p = self.cat_style_and_semantic_vectors(zs3_p, zc3)
         l1_img_l2_text_decoded_x = self.decoding(l1_img_l2_text_x_p)
         l1_img_l2_text_pred_img = self.convert_to_img(l1_img_l2_text_decoded_x)
