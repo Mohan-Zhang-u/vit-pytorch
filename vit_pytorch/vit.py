@@ -8,6 +8,7 @@ from einops.layers.torch import Rearrange
 import numpy as np
 import torchvision.transforms as T
 from PIL import Image
+import mzutils
 
 # helpers
 
@@ -457,7 +458,7 @@ class ViTwithTextInputChinese(nn.Module):
         return pred_img
 
 class ViTwithTextInputHorizontal(nn.Module):
-    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, decoder_depth, language_transform_depth, heads, decoder_heads, language_transform_heads, mlp_dim, decoder_mlp_dim, language_transform_dim, text_dict_list, channels = 3, dim_head = 64, decoder_dim_head=64, language_transform_dim_head=64, dropout = 0., decoder_dropout = 0., language_transform_dropout = 0., emb_dropout = 0., text_seq_length = 64, unknown_char_loc='unknown.txt', text_padding_idx = 0, use_SPT=False, img_loss_weight = 1., intermediate_feature_loss_weight = 0.05, text_loss_weight = 0.1, vector_loss_weight = 1.):
+    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, decoder_depth, language_transform_depth, heads, decoder_heads, language_transform_heads, mlp_dim, decoder_mlp_dim, language_transform_dim, text_dict_list, normalize=True, pad_center_crop=False, channels = 3, dim_head = 64, decoder_dim_head=64, language_transform_dim_head=64, dropout = 0., decoder_dropout = 0., language_transform_dropout = 0., emb_dropout = 0., text_seq_length = 64, unknown_char_loc='unknown.txt', text_padding_idx = 0, use_SPT=False, img_loss_weight = 1., intermediate_feature_loss_weight = 0.05, text_loss_weight = 0.1, vector_loss_weight = 1.):
         super().__init__()
         # init text embedding layer
         self.cls_token_len = 1
@@ -472,7 +473,7 @@ class ViTwithTextInputHorizontal(nn.Module):
         self.dim = dim # both encoder dim and decoder dim.
         self.text_dict_length = len(text_dict_list)
         self.one_hot_dim = torch.nn.functional.one_hot(torch.tensor(list(range(self.dim))), num_classes = self.dim).float() # torch.Size(img.shape[0], text_seq_length, dim) TODO: here, we are using it as our text_embedding. We pad len(self.text_dict_list) to self.dim, which is a huge waste of compute. Can we improve this?
-        self.processor = ExperimentProcessor(image_size=image_size)
+        self.processor = ExperimentProcessor(image_size=image_size, normalize=normalize, pad_center_crop=pad_center_crop)
         
         self.image_height, self.image_width = pair(image_size)
         self.patch_height, self.patch_width = pair(patch_size)
@@ -859,55 +860,72 @@ class ViTwithTextInputHorizontal(nn.Module):
 
 
 class ExperimentProcessor:
-    def __init__(self, image_size, normalize=True, normalize_mean=np.array([0.485, 0.456, 0.406]), normalize_std=np.array([0.229, 0.224, 0.225])):
+    def __init__(self, image_size, pad_center_crop=False, resize=True, to_tensor=True, normalize=True, normalize_mean=np.array([0.485, 0.456, 0.406]), normalize_std=np.array([0.229, 0.224, 0.225])):
         self.image_size = image_size
+        self.pad_center_crop = pad_center_crop
+        self.resize = resize
+        self.to_tensor = to_tensor
         self.normalize = normalize
         self.normalize_mean = normalize_mean
         self.normalize_std = normalize_std
+        
+    def preprocess_transform_one_img(self, pil_img):
+        """
+        img_tensor is one image tensor whose len of shape is 3.
+        order:
+        PadCenterCrop,
+        Resize,
+        ToTensor
+        Normalize,
+        """
+        w, h = pil_img.size
+        transform_list = []
+        if self.pad_center_crop:
+            max_len = max(w, h)
+            transform_list.append(mzutils.PadCenterCrop(max_len, pad_if_needed=True, fill='white'))
+        if self.resize:
+            transform_list.append(T.Resize(size=(self.image_size, self.image_size))) # h, w
+        if self.to_tensor:
+            transform_list.append(T.ToTensor())
         if self.normalize:
-            self.encode_transform = T.Compose(
-                [
-                    T.Resize(size=(image_size, image_size)), # h, w
-                    T.ToTensor(),
-                    T.Normalize(normalize_mean.tolist(), normalize_std.tolist()),
-                ]
-            )
-        else:
-            self.encode_transform = T.Compose(
-                [
-                    T.Resize(size=(image_size, image_size)), # h, w
-                    T.ToTensor(),
-                ]
-            )
+            transform_list.append(T.Normalize(self.normalize_mean.tolist(), self.normalize_std.tolist()))
+        encode_transform = T.Compose(transform_list)
+        img_tensor = encode_transform(pil_img)
+        # pil_img.save('pil_img.jpg')
+        return img_tensor
     
     def preprocess_transform_imgs(self, pil_imgs, device='cpu'):
         """
         pil_imgs: list of PIL.Image
         """
         img_sizes = [img.size for img in pil_imgs] # [(w, h)]
-        img_tensors = [self.encode_transform(pil_img) for pil_img in pil_imgs]
+        img_tensors = [self.preprocess_transform_one_img(pil_img) for pil_img in pil_imgs]
         img_tensors = torch.stack(img_tensors).to(device)
         return img_tensors, img_sizes
     
     def postprocess_transform_one_tensor(self, img_tensor, h=256, w=256):
         """
         img_tensor is one image tensor whose len of shape is 3.
+        Normalize,
+        ToPILImage,
+        Resize,
+        PadCenterCrop,
         """
+        transform_list = []
         if self.normalize:
-            decode_transform = T.Compose(
-                [
-                    T.Normalize((-self.normalize_mean / self.normalize_std).tolist(), (1.0 / self.normalize_std).tolist()),
-                    T.ToPILImage(),
-                    T.Resize(size=(h, w)),
-                ]
-            )
+            transform_list.append(T.Normalize((-self.normalize_mean / self.normalize_std).tolist(), (1.0 / self.normalize_std).tolist()))
+        if self.to_tensor:
+            transform_list.append(T.ToPILImage())
+        if self.pad_center_crop:
+            if self.resize:
+                max_len = max(w, h)
+                transform_list.append(T.Resize(size=(max_len, max_len)))
+            transform_list.append(T.CenterCrop(size=(h, w)))
+            
         else:
-            decode_transform = T.Compose(
-                [
-                    T.ToPILImage(),
-                    T.Resize(size=(h, w)),
-                ]
-            )
+            if self.resize:
+                transform_list.append(T.Resize(size=(h, w)))
+        decode_transform = T.Compose(transform_list)
         pil_img = decode_transform(img_tensor)
         # pil_img.save('pil_img.jpg')
         return pil_img
