@@ -146,7 +146,7 @@ class SPT(nn.Module):
         return self.to_patch_tokens(x_with_shifts)
 
 class ViTwithTextInputHorizontal(nn.Module):
-    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, decoder_depth, language_transform_depth, heads, decoder_heads, language_transform_heads, mlp_dim, decoder_mlp_dim, language_transform_dim, text_dict_list, normalize=True, pad_center_crop=False, channels = 3, dim_head = 64, decoder_dim_head=64, language_transform_dim_head=64, dropout = 0., decoder_dropout = 0., language_transform_dropout = 0., emb_dropout = 0., text_seq_length = 64, unknown_char_loc='unknown.txt', text_padding_idx = 0, use_SPT=False, img_loss_name = 'BCELoss', img_loss_weight = 0.01, intermediate_feature_loss_weight = 0.05, text_loss_weight = 0.1, vector_loss_weight = 1.):
+    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, decoder_depth, language_transform_depth, heads, decoder_heads, language_transform_heads, mlp_dim, decoder_mlp_dim, language_transform_dim, text_dict_list, normalize=True, pad_center_crop=False, channels = 3, dim_head = 64, decoder_dim_head=64, language_transform_dim_head=64, dropout = 0., decoder_dropout = 0., language_transform_dropout = 0., emb_dropout = 0., text_seq_length = 64, unknown_char_loc='unknown.txt', text_padding_idx = 0, use_SPT=False, img_loss_name = 'BCELoss', img_loss_weight = 0.001, intermediate_feature_loss_weight = 0.05, text_loss_weight = 0.1, vector_loss_weight = 1.):
         super().__init__()
         # init text embedding layer
         self.cls_token_len = 1
