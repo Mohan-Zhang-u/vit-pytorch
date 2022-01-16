@@ -146,7 +146,7 @@ class SPT(nn.Module):
         return self.to_patch_tokens(x_with_shifts)
 
 class ViTwithTextInputHorizontal(nn.Module):
-    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, decoder_depth, language_transform_depth, heads, decoder_heads, language_transform_heads, mlp_dim, decoder_mlp_dim, language_transform_dim, text_dict_list, normalize=True, pad_center_crop=False, channels = 3, dim_head = 64, decoder_dim_head=64, language_transform_dim_head=64, dropout = 0., decoder_dropout = 0., language_transform_dropout = 0., emb_dropout = 0., text_seq_length = 64, unknown_char_loc='unknown.txt', text_padding_idx = 0, use_SPT=False, img_loss_name = 'BCELoss', img_loss_weight = 0.001, intermediate_feature_loss_weight = 0.05, text_loss_weight = 0.1, vector_loss_weight = 1.):
+    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, decoder_depth, language_transform_depth, heads, decoder_heads, language_transform_heads, mlp_dim, decoder_mlp_dim, language_transform_dim, text_dict_list, normalize=True, pad_center_crop=False, channels = 3, dim_head = 64, decoder_dim_head=64, language_transform_dim_head=64, dropout = 0., decoder_dropout = 0., language_transform_dropout = 0., emb_dropout = 0., text_seq_length = 64, unknown_char_loc='unknown.txt', text_padding_idx = 0, use_SPT=False, img_loss_name = 'BCEWithLogitsLoss', img_loss_weight = 0.001, intermediate_feature_loss_weight = 0.05, text_loss_weight = 0.1, vector_loss_weight = 1.):
         super().__init__()
         # init text embedding layer
         self.cls_token_len = 1
@@ -197,12 +197,17 @@ class ViTwithTextInputHorizontal(nn.Module):
         self.to_pixels = nn.Linear(dim, patch_dim)
         
         # loss functions
-        if img_loss_name == 'BCELoss':
-            self.img_loss = torch.nn.BCELoss(reduction='sum')
-        elif img_loss_name == 'MSELoss':
+        self.img_loss_name = img_loss_name
+        if self.img_loss_name == 'BCEWithLogitsLoss':
+            self.img_loss = torch.nn.BCEWithLogitsLoss(reduction='sum') # we need to add an sigmoid layer at the end of img prediction.
+            self.sigmoid_regularize_func = nn.Sigmoid()
+        elif self.img_loss_name == 'BCELoss':
+            self.img_loss = torch.nn.BCELoss(reduction='sum') # we need to clip the predction to [0,1]
+            print("For numerical stability, we suggest BCEWithLogitsLoss over this!")
+        elif self.img_loss_name == 'MSELoss':
             self.img_loss = torch.nn.MSELoss(reduction='sum')
         else:
-            raise ValueError('Unknown loss, should be either BCELoss or MSELoss')
+            raise ValueError('Unknown loss, should be either BCEWithLogitsLoss, BCELoss or MSELoss')
         self.img_loss_weight = img_loss_weight
         self.intermediate_feature_loss = torch.nn.MSELoss(reduction='mean')
         self.intermediate_feature_loss_weight = intermediate_feature_loss_weight
@@ -285,6 +290,10 @@ class ViTwithTextInputHorizontal(nn.Module):
         img_patches = self.get_img_patches_from_x(decoded_x)
         pix = self.to_pixels(img_patches) # torch.Size([img.shape[0], num_patches, patch_dim])
         img_back = rearrange(pix, 'b (hn wn) (p1 p2 c) -> b c (hn p1) (wn p2)', p1=self.patch_height, p2=self.patch_width, hn=self.h_n_patches, wn=self.w_n_patches) # torch.Size([img.shape[0], c, self.image_height, self.image_width])
+        if self.img_loss_name == 'BCEWithLogitsLoss':
+            img_back = self.sigmoid_regularize_func(img_back) # we need to add an sigmoid layer at the end of img prediction.
+        elif self.img_loss_name == 'BCELoss':
+            img_back =  torch.clamp(img_back, min=1e-8, max=1-1e-8) # we need to clip the predction to [0,1]
         return img_back
     
     def get_text_maxs(self, decoded_x):
