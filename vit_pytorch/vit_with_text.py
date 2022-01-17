@@ -278,11 +278,12 @@ class ViTwithTextInputHorizontal(nn.Module):
     def cat_style_and_semantic_vectors(self, style_vector, semantic_vector):
         return torch.cat((style_vector, semantic_vector), dim=1)
     
-    def convert_to_img(self, decoded_x):
+    def convert_to_img(self, decoded_x, mode='loss_compute'):
         """[summary]
 
         Args:
             decoded_x ([type]): [description]
+            mode (str): can be 'loss_compute' or 'inference'.
 
         Returns:
             a image vector.
@@ -290,10 +291,12 @@ class ViTwithTextInputHorizontal(nn.Module):
         img_patches = self.get_img_patches_from_x(decoded_x)
         pix = self.to_pixels(img_patches) # torch.Size([img.shape[0], num_patches, patch_dim])
         img_back = rearrange(pix, 'b (hn wn) (p1 p2 c) -> b c (hn p1) (wn p2)', p1=self.patch_height, p2=self.patch_width, hn=self.h_n_patches, wn=self.w_n_patches) # torch.Size([img.shape[0], c, self.image_height, self.image_width])
-        if self.img_loss_name == 'BCEWithLogitsLoss':
-            img_back = self.sigmoid_regularize_func(img_back) # we need to add an sigmoid layer at the end of img prediction.
-        elif self.img_loss_name == 'BCELoss':
-            img_back =  torch.clamp(img_back, min=1e-8, max=1-1e-8) # we need to clip the predction to [0,1]
+        # if self.img_loss_name == 'BCEWithLogitsLoss':
+        #     img_back = self.sigmoid_regularize_func(img_back) # we need to add an sigmoid layer at the end of img prediction.
+        if self.img_loss_name == 'BCELoss':
+            img_loss = mzutils.differentiable_clamp(img_back, min=1e-8, max=1-1e-8) # we need to clip the predction to [1e-8,1-1e-8] for numerical stability.
+        if mode == 'inference' and self.img_loss_name == 'BCEWithLogitsLoss':
+            img_back = self.sigmoid_regularize_func(img_back) # we need to add an sigmoid layer at the end of img prediction to shape the prediction to [0,1].
         return img_back
     
     def get_text_maxs(self, decoded_x):
@@ -310,7 +313,7 @@ class ViTwithTextInputHorizontal(nn.Module):
         orig_img is a list of PIL.Image.Image
         """
         processed_imgs, size = self.processor.preprocess_transform_imgs(orig_img, device = device)
-        return self.img_loss_weight * self.img_loss(processed_imgs, pred_img)
+        return self.img_loss_weight * self.img_loss(pred_img, processed_imgs)
     
     def compute_vector_loss(self, orig_vector, pred_vector):
         return self.vector_loss_weight * self.vector_loss(orig_vector, pred_vector)
@@ -535,7 +538,7 @@ class ViTwithTextInputHorizontal(nn.Module):
             raise ValueError('l2_language_label must be either "l1" or "l2"')
         l1_img_l2_text_x_p = self.cat_style_and_semantic_vectors(zs3_p, zc3)
         l1_img_l2_text_decoded_x = self.decoding(l1_img_l2_text_x_p)
-        l1_img_l2_text_pred_img = self.convert_to_img(l1_img_l2_text_decoded_x)
+        l1_img_l2_text_pred_img = self.convert_to_img(l1_img_l2_text_decoded_x, mode='inference')
         converted_imgs = self.processor.postprocess_transform_tensors(l1_img_l2_text_pred_img, target_image_sizes)
         return converted_imgs
     
@@ -555,7 +558,7 @@ class ViTwithTextInputHorizontal(nn.Module):
         l1_text_sizes = [len(text) for text in l1_texts]
         x = self.encoding(l1_imgs, l1_texts, l1_language_labels, l1_img_sizes)
         decoded_x = self.decoding(x)
-        pred_img = self.convert_to_img(decoded_x)
+        pred_img = self.convert_to_img(decoded_x, mode='inference')
         converted_imgs = self.processor.postprocess_transform_tensors(pred_img, l1_img_sizes)
         converted_texts = self.convert_to_text(decoded_x)
         return converted_imgs, converted_texts
