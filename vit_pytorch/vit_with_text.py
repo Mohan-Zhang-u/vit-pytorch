@@ -294,7 +294,7 @@ class ViTwithTextInputHorizontal(nn.Module):
         # if self.img_loss_name == 'BCEWithLogitsLoss':
         #     img_back = self.sigmoid_regularize_func(img_back) # we need to add an sigmoid layer at the end of img prediction.
         if self.img_loss_name == 'BCELoss':
-            img_loss = mzutils.differentiable_clamp(img_back, min=1e-8, max=1-1e-8) # we need to clip the predction to [1e-8,1-1e-8] for numerical stability.
+            img_back = mzutils.differentiable_clamp(img_back, min=1e-8, max=1-1e-8) # we need to clip the predction to [1e-8,1-1e-8] for numerical stability.
         if mode == 'inference' and self.img_loss_name == 'BCEWithLogitsLoss':
             img_back = self.sigmoid_regularize_func(img_back) # we need to add an sigmoid layer at the end of img prediction to shape the prediction to [0,1].
         return img_back
