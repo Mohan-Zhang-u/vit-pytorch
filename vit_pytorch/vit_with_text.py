@@ -234,7 +234,7 @@ class ViTwithTextInputHorizontal(nn.Module):
                 if char_s in self.text_dict_list:
                     sub_indices.append(self.text_dict_list.index(char_s))
                 else:
-                    sub_indices.append(self.text_dict_list.index('𖡄')) # unknown character.
+                    sub_indices.append(self.text_dict_list.index(' ')) # unknown character.
                     if char_s not in self.unknown_chars:
                         print('unknown:', char_s)
                         self.unknown_chars.append(char_s)
@@ -253,7 +253,10 @@ class ViTwithTextInputHorizontal(nn.Module):
             text = ''
             for char_indices in text_indices:
                 idx = char_indices.item()
-                text += self.text_dict_list[idx]
+                if idx >= len(self.text_dict_list): # prediction out of dictionary.
+                    text += ' '
+                else:
+                    text += self.text_dict_list[idx]
             texts.append(text)
         return texts
     
