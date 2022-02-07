@@ -146,7 +146,7 @@ class SPT(nn.Module):
         return self.to_patch_tokens(x_with_shifts)
 
 class ViTwithTextInputHorizontal(nn.Module):
-    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, decoder_depth, language_transform_depth, heads, decoder_heads, language_transform_heads, mlp_dim, decoder_mlp_dim, language_transform_dim, text_dict_list, normalize=True, pad_center_crop=False, channels = 3, dim_head = 64, decoder_dim_head=64, language_transform_dim_head=64, dropout = 0., decoder_dropout = 0., language_transform_dropout = 0., emb_dropout = 0., text_seq_length = 64, unknown_char_loc='unknown.txt', text_padding_idx = 0, use_SPT=False, img_loss_name = 'BCEWithLogitsLoss', img_loss_weight = 0.001, intermediate_feature_loss_weight = 0.05, text_loss_weight = 0.1, vector_loss_weight = 1.):
+    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, decoder_depth, language_transform_depth, heads, decoder_heads, language_transform_heads, mlp_dim, decoder_mlp_dim, language_transform_dim, text_dict_list, normalize=True, pad_center_crop=False, channels = 3, dim_head = 64, decoder_dim_head=64, language_transform_dim_head=64, dropout = 0., decoder_dropout = 0., language_transform_dropout = 0., emb_dropout = 0., text_seq_length = 64, unknown_char_loc='unknown.txt', text_padding_idx = 0, use_SPT=False, img_loss_name = 'BCEWithLogitsLoss', target_img_loss_weight = 0.01, reconstruct_img_loss_weight = 0.001, intermediate_feature_loss_weight = 0.05, text_loss_weight = 0.1, vector_loss_weight = 1.):
         super().__init__()
         # init text embedding layer
         self.cls_token_len = 1
@@ -208,7 +208,9 @@ class ViTwithTextInputHorizontal(nn.Module):
             self.img_loss = torch.nn.MSELoss(reduction='sum')
         else:
             raise ValueError('Unknown loss, should be either BCEWithLogitsLoss, BCELoss or MSELoss')
-        self.img_loss_weight = img_loss_weight
+        
+        self.target_img_loss_weight = target_img_loss_weight
+        self.reconstruct_img_loss_weight = reconstruct_img_loss_weight
         self.intermediate_feature_loss = torch.nn.MSELoss(reduction='mean')
         self.intermediate_feature_loss_weight = intermediate_feature_loss_weight
         self.text_loss = torch.nn.CrossEntropyLoss(reduction='mean', label_smoothing=0.) # https://discuss.pytorch.org/t/loss-functions-for-batches/20488/7 batch size included.
@@ -311,12 +313,15 @@ class ViTwithTextInputHorizontal(nn.Module):
         max_vals, max_indices = self.get_text_maxs(decoded_x)
         return self.indices_to_text(max_indices)
     
-    def compute_img_loss(self, orig_img, pred_img, device='cpu'):
+    def compute_img_loss(self, orig_img, pred_img, target_image=False, device='cpu'):
         """
         orig_img is a list of PIL.Image.Image
         """
         processed_imgs, size = self.processor.preprocess_transform_imgs(orig_img, device = device)
-        return self.img_loss_weight * self.img_loss(pred_img, processed_imgs)
+        if target_image:
+            return self.target_img_loss_weight * self.img_loss(pred_img, processed_imgs)
+        else:
+            return self.reconstruct_img_loss_weight * self.img_loss(pred_img, processed_imgs)
     
     def compute_vector_loss(self, orig_vector, pred_vector):
         return self.vector_loss_weight * self.vector_loss(orig_vector, pred_vector)
@@ -452,7 +457,7 @@ class ViTwithTextInputHorizontal(nn.Module):
         # l1 reconstruction loss
         l1_self_pred_img = self.convert_to_img(l1_decoded_x)
         l1_self_pred_text_patches = self.get_text_patches_from_x(l1_decoded_x)
-        loss1 = self.compute_img_loss(l1_imgs, l1_self_pred_img, device=self.to_pixels.weight.device)
+        loss1 = self.compute_img_loss(l1_imgs, l1_self_pred_img, target_image=False, device=self.to_pixels.weight.device) # reconstruction image
         loss2 = self.compute_text_loss(l1_texts, l1_self_pred_text_patches)
         loss17 = self.compute_intermediate_feature_loss(l1_decoded_x, l1_language_labels, l1_img_sizes, l1_img_sizes, l1_text_sizes)
         # l1_recon_loss = loss1 + loss2 + loss 17
@@ -463,7 +468,7 @@ class ViTwithTextInputHorizontal(nn.Module):
         # l2 reconstruction loss
         l2_self_pred_img = self.convert_to_img(l2_decoded_x)
         l2_self_pred_text_patches = self.get_text_patches_from_x(l2_decoded_x)
-        loss3 = self.compute_img_loss(l2_imgs, l2_self_pred_img, device=self.to_pixels.weight.device)
+        loss3 = self.compute_img_loss(l2_imgs, l2_self_pred_img, target_image=False, device=self.to_pixels.weight.device) # reconstruction image
         loss4 = self.compute_text_loss(l2_texts, l2_self_pred_text_patches)
         loss18 = self.compute_intermediate_feature_loss(l2_decoded_x, l2_language_labels, l2_img_sizes, l2_img_sizes, l2_text_sizes)
         # l2_recon_loss = loss3 + loss4 + loss18
@@ -496,7 +501,7 @@ class ViTwithTextInputHorizontal(nn.Module):
         l1_img_l2_text_decoded_x = self.decoding(l1_img_l2_text_x_p)
         l1_img_l2_text_pred_img = self.convert_to_img(l1_img_l2_text_decoded_x)
         l1_img_l2_text_pred_text_patches = self.get_text_patches_from_x(l1_img_l2_text_decoded_x)
-        loss11 = self.compute_img_loss(l2_imgs, l1_img_l2_text_pred_img, device=self.to_pixels.weight.device)
+        loss11 = self.compute_img_loss(l2_imgs, l1_img_l2_text_pred_img, target_image=True, device=self.to_pixels.weight.device)
         loss12 = self.compute_text_loss(l2_texts, l1_img_l2_text_pred_text_patches)
         loss19 = self.compute_intermediate_feature_loss(l1_img_l2_text_decoded_x, l2_language_labels, l1_img_sizes, l2_img_sizes, l2_text_sizes)
         
@@ -511,7 +516,7 @@ class ViTwithTextInputHorizontal(nn.Module):
         l2_img_l1_text_decoded_x = self.decoding(l2_img_l1_text_x_p)
         l2_img_l1_text_pred_img = self.convert_to_img(l2_img_l1_text_decoded_x)
         l2_img_l1_text_pred_text_patches = self.get_text_patches_from_x(l2_img_l1_text_decoded_x)
-        loss15 = self.compute_img_loss(l1_imgs, l2_img_l1_text_pred_img, device=self.to_pixels.weight.device)
+        loss15 = self.compute_img_loss(l1_imgs, l2_img_l1_text_pred_img, target_image=True, device=self.to_pixels.weight.device)
         loss16 = self.compute_text_loss(l1_texts, l2_img_l1_text_pred_text_patches)
         loss20 = self.compute_intermediate_feature_loss(l2_img_l1_text_decoded_x, l1_language_labels, l2_img_sizes, l1_img_sizes, l1_text_sizes)
         return loss1, loss2, loss3, loss4, loss5, loss6, loss7, loss8, loss9, loss10, loss11, loss12, loss13, loss14, loss15, loss16, loss17, loss18, loss19, loss20
